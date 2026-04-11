@@ -1,0 +1,13 @@
+dataset_kind: locata_like
+root_dir: ${hydra:runtime.cwd}/dev
+audio_cache_dir: ${hydra:runtime.cwd}/dev/.cache/audio_16k
+input_sample_rate: 48000
+model_sample_rate: 16000
+channel_mode: first_n
+num_input_channels: ${model.num_input_channels}
+history_frames: ${model.history_frames}
+future_frames: ${model.future_frames}
+frame_hop_seconds: 0.01
+window_stride_frames: 10
+max_sources: ${model.max_sources}
+synthetic_size: 32

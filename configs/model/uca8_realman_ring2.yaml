@@ -1,0 +1,15 @@
+name: uca8_realman_ring2
+num_input_channels: 8
+array_radius_m: 0.06
+sound_speed: 343.0
+max_sources: 4
+num_count_classes: 5
+future_frames: 32
+history_frames: 128
+heatmap_bins: 72
+spec_hidden_dim: 128
+spatial_hidden_dim: 64
+model_dim: 256
+tcn_kernel_size: 3
+tcn_dilations: [1, 2, 4, 8, 16, 32]
+dropout: 0.1

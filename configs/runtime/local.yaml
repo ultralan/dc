@@ -1,0 +1,5 @@
+accelerator: auto
+devices: 1
+precision: 32-true
+deterministic: true
+matmul_precision: high

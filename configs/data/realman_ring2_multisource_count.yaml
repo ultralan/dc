@@ -1,0 +1,29 @@
+dataset_kind: realman_ring2_hybrid
+root_dir: ${hydra:runtime.cwd}/realman_demo/extracted/ring2_8ch
+moving_csv: ${hydra:runtime.cwd}/realman_demo/raw/val/val_moving_source_location.csv
+static_csv: ${hydra:runtime.cwd}/realman_demo/raw/val/val_static_source_location.csv
+manifest_path: ${hydra:runtime.cwd}/realman_demo/extracted/ring2_8ch/.cache/realman_ring2_manifest.json
+use_manifest_cache: true
+audio_cache_dir: ${hydra:runtime.cwd}/realman_demo/extracted/ring2_8ch/.cache/audio_16k
+channel_ids: [9, 10, 11, 12, 13, 14, 15, 16]
+model_sample_rate: 16000
+input_sample_rate: 16000
+history_frames: ${model.history_frames}
+future_frames: ${model.future_frames}
+split: train
+val_ratio: 0.15
+split_seed: ${seed}
+frame_hop_seconds: 0.01
+window_stride_frames: 10
+max_sources: ${model.max_sources}
+max_items: null
+curriculum_ratio: 2.0
+curriculum_size: null
+curriculum_seed: ${seed}
+curriculum_rollout_steps: 24
+curriculum_mode_weights:
+  single_arc: 0.05
+  single_reverse: 0.00
+  dual_overlap: 0.30
+  dual_enter: 0.20
+  dual_leave: 0.45

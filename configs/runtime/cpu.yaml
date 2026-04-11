@@ -1,0 +1,4 @@
+accelerator: cpu
+devices: 1
+precision: 32-true
+deterministic: true

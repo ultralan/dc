@@ -1,0 +1,7 @@
+sample_rate: ${data.model_sample_rate}
+n_fft: 512
+win_length: 400
+hop_length: 160
+spec_bins: 64
+ipd_bins: 32
+azimuth_bins: ${model.heatmap_bins}

@@ -1,0 +1,10 @@
+defaults:
+  - model: uca8_tracktrend
+  - data: locata_like
+  - feature: stft_16k
+  - train: base
+  - runtime: local
+  - _self_
+
+experiment_name: uca8_tracktrend_mvp
+seed: 42
