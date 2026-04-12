@@ -18,7 +18,13 @@ from matplotlib import pyplot as plt
 from omegaconf import OmegaConf
 from uca8.data.label_builder import TrackTrendLabelBuilder
 from uca8.geometry.uca8 import make_uniform_circular_array, wrap_angle
-from uca8.metrics import slot_count_from_state
+from uca8.metrics import (
+    heatmap_contrast,
+    heatmap_peak_recall_stats,
+    primary_slot_range_stats,
+    slot_count_from_state,
+    slot_trend_label_from_sequence,
+)
 from uca8.postprocess import estimate_source_count_from_heatmap
 from uca8.utils.audio_io import load_audio_file
 
@@ -43,6 +49,7 @@ plt.switch_backend("Agg")
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNS_ROOT = ROOT / "runs"
+SLOT_TREND_LABELS = {-1: "clockwise", 0: "stable", 1: "counter_clockwise"}
 
 
 def parse_args() -> argparse.Namespace:
@@ -170,6 +177,12 @@ def build_frame_audit(item: dict[str, Any]) -> dict[str, Any]:
             [None if not np.isfinite(value) else float(value) for value in row]
             for row in item["future_pred_slots_deg"]
         ],
+        "current_primary_roll_range_deg": float(item["current_primary_roll_range_deg"]),
+        "future_primary_range_ratio": float(item["future_primary_range_ratio"]),
+        "future_heatmap_peak_recall_at_2": float(item["future_heatmap_peak_recall_at_2"]),
+        "future_heatmap_contrast": float(item["future_heatmap_contrast"]),
+        "trend_from_future_slots": str(item["trend_from_future_slots"]),
+        "collapse_warning": bool(item["collapse_warning"]),
     }
 
 
@@ -287,6 +300,25 @@ def build_rollout(
             .numpy()
             .astype(np.int64)
         )
+        future_range_ratio, _, _, _ = primary_slot_range_stats(
+            predictions["future_slot_logits"][0].cpu(),
+            targets.slot_state[future_slice],
+            pred_is_logits=True,
+            target_is_logits=False,
+        )
+        future_heat_recall_sum, future_heat_recall_total = heatmap_peak_recall_stats(
+            future_heat_pred,
+            targets.heatmap[future_slice],
+            targets.count[future_slice],
+            tolerance_bins=2,
+        )
+        future_heat_contrast = float(heatmap_contrast(future_heat_pred).item())
+        future_slot_trend = SLOT_TREND_LABELS[
+            slot_trend_label_from_sequence(
+                predictions["future_slot_logits"][0].cpu(),
+                is_logits=True,
+            )
+        ]
         current_count_pred = current_count_pred_slot
         future_count_pred = future_count_pred_slot
 
@@ -320,6 +352,19 @@ def build_rollout(
                 "current_pred_slots_deg": current_pred_slots_deg,
                 "future_target_slots_deg": future_target_slots_deg,
                 "future_pred_slots_deg": future_pred_slots_deg,
+                "current_slot_state_target": targets.slot_state[current_idx].cpu(),
+                "current_slot_state_pred": predictions["slot_logits"][0].cpu(),
+                "future_slot_state_target": targets.slot_state[future_slice].cpu(),
+                "future_slot_state_pred": predictions["future_slot_logits"][0].cpu(),
+                "future_primary_range_ratio": float(future_range_ratio.item()),
+                "future_heatmap_peak_recall_at_2": float(
+                    (future_heat_recall_sum / future_heat_recall_total.clamp_min(1.0)).item()
+                ),
+                "future_heatmap_contrast": future_heat_contrast,
+                "trend_from_future_slots": future_slot_trend,
+                "collapse_warning": bool(
+                    float(future_range_ratio.item()) < 0.2 or future_heat_contrast < 0.15
+                ),
                 "source_xy": source_positions[:, :, :2].cpu().numpy(),
                 "source_activity": source_activity.cpu().numpy(),
             }
@@ -342,7 +387,20 @@ def render_animation(
     trend_correct = 0
     current_angle_errors: list[float] = []
     future_angle_errors: list[float] = []
+    future_range_ratios: list[float] = []
+    future_heat_recalls: list[float] = []
+    future_heat_contrasts: list[float] = []
+    collapse_warning_count = 0
     slot_colors = plt.get_cmap("tab10")(np.arange(10))
+    _, current_roll_pred_range, _, _ = primary_slot_range_stats(
+        torch.stack([item["current_slot_state_pred"] for item in frames], dim=0),
+        torch.stack([item["current_slot_state_target"] for item in frames], dim=0),
+        pred_is_logits=True,
+        target_is_logits=False,
+    )
+    current_primary_roll_range_deg = float(current_roll_pred_range.item())
+    for item in frames:
+        item["current_primary_roll_range_deg"] = current_primary_roll_range_deg
 
     for item in frames:
         frame_audits.append(build_frame_audit(item))
@@ -352,6 +410,10 @@ def render_animation(
         )
         future_count_total += int(item["future_count_target"].shape[0])
         trend_correct += int(item["trend_target"] == item["trend_pred"])
+        future_range_ratios.append(float(item["future_primary_range_ratio"]))
+        future_heat_recalls.append(float(item["future_heatmap_peak_recall_at_2"]))
+        future_heat_contrasts.append(float(item["future_heatmap_contrast"]))
+        collapse_warning_count += int(bool(item["collapse_warning"]))
         current_angle_errors.append(
             slot_angle_mae_deg(item["current_target_slots_deg"], item["current_pred_slots_deg"])
         )
@@ -487,15 +549,31 @@ def render_animation(
                 f"current count head raw: {item['current_count_pred_head']}",
                 current_slot_peak_line,
                 f"trend target/pred: {item['trend_target']}/{item['trend_pred']}",
+                f"future-slot trend: {item['trend_from_future_slots']}",
                 future_frame_acc_line,
                 f"current slot target: {format_angle_list(item['current_target_slots_deg'])}",
                 f"current slot pred: {format_angle_list(item['current_pred_slots_deg'])}",
                 f"current slot MAE: {current_angle_errors[-1]:.1f} deg",
                 f"future slot MAE: {future_angle_errors[-1]:.1f} deg",
+                f"current roll range: {item['current_primary_roll_range_deg']:.2f} deg",
+                f"future range ratio: {item['future_primary_range_ratio']:.2f}",
+                f"future heat recall@2: {item['future_heatmap_peak_recall_at_2']:.2f}",
+                f"future heat contrast: {item['future_heatmap_contrast']:.2f}",
+                f"collapse warning: {item['collapse_warning']}",
                 "scene/horizon share slot colors; dashed target means future",
             ]
         )
-        ax_text.text(0.02, 0.98, text, va="top", ha="left", fontsize=12, family="monospace")
+        text_color = "crimson" if item["collapse_warning"] else "black"
+        ax_text.text(
+            0.02,
+            0.98,
+            text,
+            va="top",
+            ha="left",
+            fontsize=12,
+            family="monospace",
+            color=text_color,
+        )
 
         ax_future_target.imshow(
             item["future_heat_target"].T,
@@ -575,6 +653,15 @@ def render_animation(
         if current_angle_errors
         else 0.0,
         "future_angle_mae_deg": float(np.mean(future_angle_errors)) if future_angle_errors else 0.0,
+        "current_primary_roll_range_deg": current_primary_roll_range_deg,
+        "future_primary_range_ratio": float(np.mean(future_range_ratios)) if future_range_ratios else 0.0,
+        "future_heatmap_peak_recall_at_2": float(np.mean(future_heat_recalls))
+        if future_heat_recalls
+        else 0.0,
+        "future_heatmap_contrast": float(np.mean(future_heat_contrasts))
+        if future_heat_contrasts
+        else 0.0,
+        "collapse_warning_rate": collapse_warning_count / max(len(frames), 1),
         "angle_metric_basis": "slot_mae_over_finite_assignments",
         "count_decoder": "slot_activity_count_primary",
         "gif": output_path.name,

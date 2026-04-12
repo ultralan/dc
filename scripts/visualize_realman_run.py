@@ -153,6 +153,12 @@ def build_model(cfg: DictConfig, device: torch.device) -> UCA8TrackTrendNet:
         tcn_dilations=list(cfg.model.tcn_dilations),
         tcn_kernel_size=int(cfg.model.tcn_kernel_size),
         dropout=float(cfg.model.dropout),
+        slot_decoder_attention_heads=int(cfg.model.get("slot_decoder_attention_heads", 4)),
+        future_decoder_layers=int(cfg.model.get("future_decoder_layers", 2)),
+        future_decoder_dropout=float(cfg.model.get("future_decoder_dropout", cfg.model.dropout)),
+        use_slot_context_in_future_decoder=bool(
+            cfg.model.get("use_slot_context_in_future_decoder", True)
+        ),
         num_count_classes=int(cfg.model.num_count_classes),
         sound_speed=float(cfg.model.sound_speed),
     ).to(device)

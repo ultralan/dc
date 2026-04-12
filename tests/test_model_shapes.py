@@ -46,6 +46,13 @@ class ModelShapeTests(unittest.TestCase):
             tuple(predictions["future_slot_logits"].shape),
             (batch, future_frames, 4, 5),
         )
+        _, hidden = model.encode(waveform, vad_history=vad_history)
+        _, slot_context = model.slot_head(hidden, query_context=hidden[:, -1], return_context=True)
+        future_hidden = model.future_decoder(hidden, current=hidden[:, -1], slot_context=slot_context)
+        self.assertGreater(
+            float((future_hidden[:, 1:] - future_hidden[:, :-1]).abs().sum().item()),
+            0.0,
+        )
         criterion = TrackTrendMultiTaskLoss()
         targets = {
             "count": torch.zeros(batch, dtype=torch.long),
@@ -61,9 +68,13 @@ class ModelShapeTests(unittest.TestCase):
         self.assertIn("slot_activity_loss", losses)
         self.assertIn("slot_regression_loss", losses)
         self.assertIn("slot_count_consistency_loss", losses)
+        self.assertIn("current_heat_kl", losses)
+        self.assertIn("slot_heat_consistency_loss", losses)
         self.assertIn("future_slot_activity_loss", losses)
         self.assertIn("future_slot_regression_loss", losses)
         self.assertIn("future_slot_count_consistency_loss", losses)
+        self.assertIn("future_heat_kl", losses)
+        self.assertIn("future_slot_delta_loss", losses)
 
     def test_future_deactivate_weight_increases_false_positive_penalty(self) -> None:
         predictions = {

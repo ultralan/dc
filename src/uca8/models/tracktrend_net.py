@@ -4,7 +4,13 @@ import torch
 from torch import nn
 
 from uca8.features.stft import UCAFeatureFrontend
-from uca8.models.heads import CountHead, FutureDecoder, HeatmapHead, SlotHead
+from uca8.models.heads import (
+    CountHead,
+    FutureRolloutDecoder,
+    FutureSlotHead,
+    HeatmapHead,
+    TemporalSlotDecoder,
+)
 from uca8.models.spatial_encoder import IPDEncoder, SRPEncoder
 from uca8.models.spec_encoder import SpectrogramEncoder
 from uca8.models.tcn_backbone import CausalTCN
@@ -31,6 +37,10 @@ class UCA8TrackTrendNet(nn.Module):
         tcn_dilations: list[int] | tuple[int, ...] = (1, 2, 4, 8, 16, 32),
         tcn_kernel_size: int = 3,
         dropout: float = 0.1,
+        slot_decoder_attention_heads: int = 4,
+        future_decoder_layers: int = 2,
+        future_decoder_dropout: float = 0.1,
+        use_slot_context_in_future_decoder: bool = True,
         num_count_classes: int = 5,
         sound_speed: float = 343.0,
     ) -> None:
@@ -67,11 +77,22 @@ class UCA8TrackTrendNet(nn.Module):
         count_input_dim = model_dim + heatmap_bins
         self.count_head = CountHead(count_input_dim, num_count_classes)
         self.heatmap_head = HeatmapHead(model_dim, heatmap_bins)
-        self.slot_head = SlotHead(model_dim, max_sources)
-        self.future_decoder = FutureDecoder(model_dim, future_frames)
+        self.slot_head = TemporalSlotDecoder(
+            model_dim,
+            max_sources,
+            attention_heads=slot_decoder_attention_heads,
+            dropout=dropout,
+        )
+        self.future_decoder = FutureRolloutDecoder(
+            model_dim,
+            future_frames,
+            num_layers=future_decoder_layers,
+            dropout=future_decoder_dropout,
+            use_slot_context=use_slot_context_in_future_decoder,
+        )
         self.future_count_head = CountHead(count_input_dim, num_count_classes)
         self.future_heatmap_head = HeatmapHead(model_dim, heatmap_bins)
-        self.future_slot_head = SlotHead(model_dim, max_sources)
+        self.future_slot_head = FutureSlotHead(model_dim, max_sources)
         self.motion_head = nn.Sequential(
             nn.LayerNorm(model_dim),
             nn.Linear(model_dim, 3),
@@ -98,7 +119,16 @@ class UCA8TrackTrendNet(nn.Module):
     ) -> dict[str, torch.Tensor]:
         features, hidden = self.encode(waveform, vad_history=vad_history)
         current = hidden[:, -1]
-        future_hidden = self.future_decoder(hidden)
+        slot_logits, slot_context = self.slot_head(
+            hidden,
+            query_context=current,
+            return_context=True,
+        )
+        future_hidden = self.future_decoder(
+            hidden,
+            current=current,
+            slot_context=slot_context,
+        )
         current_heatmap_logits = self.heatmap_head(current)
         current_count_input = torch.cat([current, torch.sigmoid(current_heatmap_logits)], dim=-1)
         future_heatmap_logits = self.future_heatmap_head(future_hidden)
@@ -106,20 +136,12 @@ class UCA8TrackTrendNet(nn.Module):
             [future_hidden, torch.sigmoid(future_heatmap_logits)],
             dim=-1,
         )
-        future_slot_logits = self.future_slot_head(
-            future_hidden.reshape(-1, future_hidden.shape[-1])
-        )
-        future_slots = future_slot_logits.reshape(
-            future_hidden.shape[0],
-            future_hidden.shape[1],
-            -1,
-            5,
-        )
+        future_slots = self.future_slot_head(future_hidden, slot_context)
         return {
             "features": features,
             "count_logits": self.count_head(current_count_input),
             "heatmap_logits": current_heatmap_logits,
-            "slot_logits": self.slot_head(current),
+            "slot_logits": slot_logits,
             "future_count_logits": self.future_count_head(future_count_input),
             "future_heatmap_logits": future_heatmap_logits,
             "future_slot_logits": future_slots,

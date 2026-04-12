@@ -8,10 +8,10 @@ weight_decay: 0.01
 gradient_clip_val: 1.0
 run_validation: true
 validate_every_n_steps: 20
-metric_for_best_checkpoint: probe/checkpoint_score
+metric_for_best_checkpoint: probe/geometry_checkpoint_score
 metric_mode: max
-secondary_metric_for_best_checkpoint: val/future_slot_count_frame_acc
-secondary_metric_mode: max
+secondary_metric_for_best_checkpoint: val/future_slot_angle_mae_deg
+secondary_metric_mode: min
 early_stopping_patience: 8
 early_stopping_min_delta: 0.0
 resume_from: null
@@ -39,6 +39,11 @@ loss_future_slot_deactivate_weight: 3.0
 loss_future_slot_count_consistency_weight: 1.2
 loss_future_slot_count_transition_weight: 3.0
 loss_motion_weight: 0.8
+loss_current_heat_kl_weight: 0.5
+loss_future_heat_kl_weight: 0.75
+loss_future_slot_delta_weight: 1.0
+loss_slot_heat_consistency_weight: 0.5
 probe_validation: true
 probe_scenarios: [dual_cross, source_enter, source_leave]
+probe_animation_steps: 24
 probe_source_audio: null

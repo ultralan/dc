@@ -18,6 +18,7 @@ from uca8.data.realman_ring2_hybrid_dataset import RealMANRing2HybridDataset
 from uca8.geometry.uca8 import make_uniform_circular_array
 from uca8.losses.multi_task_loss import TrackTrendMultiTaskLoss
 from uca8.metrics import (
+    future_slot_delta_error_stats_deg,
     slot_activity_confusion_stats,
     slot_angle_error_stats_deg,
     slot_count_accuracy_stats,
@@ -305,15 +306,19 @@ def evaluate(
         "loss",
         "count_loss",
         "heat_loss",
+        "current_heat_kl",
         "slot_activity_loss",
         "slot_regression_loss",
         "slot_count_consistency_loss",
+        "slot_heat_consistency_loss",
         "track_loss",
         "future_count_loss",
         "future_heat_loss",
+        "future_heat_kl",
         "future_slot_activity_loss",
         "future_slot_regression_loss",
         "future_slot_count_consistency_loss",
+        "future_slot_delta_loss",
         "future_track_loss",
         "future_loss",
         "motion_loss",
@@ -331,6 +336,8 @@ def evaluate(
     current_slot_angle_active = 0.0
     future_slot_angle_error_sum = 0.0
     future_slot_angle_active = 0.0
+    future_slot_delta_error_sum = 0.0
+    future_slot_delta_active = 0.0
     current_slot_tp = 0.0
     current_slot_fp = 0.0
     current_slot_fn = 0.0
@@ -396,6 +403,12 @@ def evaluate(
             )
             future_slot_angle_error_sum += float(future_angle_sum.item())
             future_slot_angle_active += float(future_angle_count.item())
+            future_delta_sum, future_delta_count = future_slot_delta_error_stats_deg(
+                predictions["future_slot_logits"],
+                batch["future_slot_state"],
+            )
+            future_slot_delta_error_sum += float(future_delta_sum.item())
+            future_slot_delta_active += float(future_delta_count.item())
             current_tp, current_fp, current_fn = slot_activity_confusion_stats(
                 predictions["slot_logits"],
                 batch["slot_state"],
@@ -444,6 +457,10 @@ def evaluate(
     )
     metrics[f"{phase}/future_slot_angle_mae_deg"] = future_slot_angle_error_sum / max(
         future_slot_angle_active,
+        1.0,
+    )
+    metrics[f"{phase}/future_slot_delta_mae_deg"] = future_slot_delta_error_sum / max(
+        future_slot_delta_active,
         1.0,
     )
     return metrics
@@ -606,6 +623,12 @@ def main(cfg: DictConfig) -> None:
         tcn_dilations=list(cfg.model.tcn_dilations),
         tcn_kernel_size=cfg.model.tcn_kernel_size,
         dropout=cfg.model.dropout,
+        slot_decoder_attention_heads=int(cfg.model.get("slot_decoder_attention_heads", 4)),
+        future_decoder_layers=int(cfg.model.get("future_decoder_layers", 2)),
+        future_decoder_dropout=float(cfg.model.get("future_decoder_dropout", cfg.model.dropout)),
+        use_slot_context_in_future_decoder=bool(
+            cfg.model.get("use_slot_context_in_future_decoder", True)
+        ),
         num_count_classes=cfg.model.num_count_classes,
         sound_speed=cfg.model.sound_speed,
     )
@@ -639,6 +662,12 @@ def main(cfg: DictConfig) -> None:
             cfg.train.get("loss_future_slot_count_transition_weight", 1.0)
         ),
         motion_weight=float(cfg.train.get("loss_motion_weight", 0.5)),
+        current_heat_kl_weight=float(cfg.train.get("loss_current_heat_kl_weight", 0.5)),
+        future_heat_kl_weight=float(cfg.train.get("loss_future_heat_kl_weight", 0.75)),
+        future_slot_delta_weight=float(cfg.train.get("loss_future_slot_delta_weight", 1.0)),
+        slot_heat_consistency_weight=float(
+            cfg.train.get("loss_slot_heat_consistency_weight", 0.5)
+        ),
     )
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -858,8 +887,10 @@ def main(cfg: DictConfig) -> None:
                     f"val_future_slot_count={val_metrics['val/future_slot_count_frame_acc']:.4f} "
                     f"val_slot_f1={val_metrics['val/current_slot_activity_f1']:.4f} "
                     f"probe_score={val_metrics.get('probe/checkpoint_score', 0.0):.4f} "
+                    f"probe_geom={val_metrics.get('probe/geometry_checkpoint_score', 0.0):.4f} "
                     f"val_trend_acc={val_metrics['val/trend_acc']:.4f} "
-                    f"val_slot_deg={val_metrics['val/current_slot_angle_mae_deg']:.2f}"
+                    f"val_slot_deg={val_metrics['val/current_slot_angle_mae_deg']:.2f} "
+                    f"val_future_delta_deg={val_metrics['val/future_slot_delta_mae_deg']:.2f}"
                 )
                 if (
                     early_stopping_patience > 0

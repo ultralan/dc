@@ -8,7 +8,14 @@ from typing import Any
 import torch
 
 from uca8.data.label_builder import TrackTrendLabelBuilder
-from uca8.metrics import slot_count_from_state
+from uca8.metrics import (
+    heatmap_contrast,
+    heatmap_peak_recall_stats,
+    primary_slot_range_stats,
+    slot_angle_error_stats_deg,
+    slot_count_from_state,
+    slot_trend_label_from_sequence,
+)
 from uca8.sim.farfield import render_farfield_history_waveform
 from uca8.utils.audio_io import load_audio_file
 
@@ -424,6 +431,9 @@ def evaluate_probe_suite(
     scenario_scores: list[float] = []
     transition_scores: list[float] = []
     count_scores: list[float] = []
+    trend_scores: list[float] = []
+    future_angle_scores: list[float] = []
+    future_heatmap_scores: list[float] = []
     with torch.no_grad():
         for scenario, samples in probe_samples.items():
             current_correct = 0.0
@@ -432,11 +442,24 @@ def evaluate_probe_suite(
             future_total = 0.0
             transition_correct = 0.0
             transition_total = 0.0
+            trend_correct = 0.0
+            trend_total = 0.0
+            future_angle_error_sum = 0.0
+            future_angle_error_count = 0.0
+            future_heat_recall_sum = 0.0
+            future_heat_recall_total = 0.0
+            future_heat_contrasts: list[float] = []
+            current_pred_rollout: list[torch.Tensor] = []
+            current_target_rollout: list[torch.Tensor] = []
+            future_pred_rollout: list[torch.Tensor] = []
             for sample in samples:
                 predictions = model(
                     sample.waveform.unsqueeze(0).to(device),
                     sample.vad_history.unsqueeze(0).to(device),
                 )
+                current_slot_pred = predictions["slot_logits"][0].detach().cpu()
+                future_slot_pred = predictions["future_slot_logits"][0].detach().cpu()
+                future_heat_pred = torch.sigmoid(predictions["future_heatmap_logits"][0]).detach().cpu()
                 current_count_pred = int(
                     slot_count_from_state(predictions["slot_logits"][0], is_logits=True).item()
                 )
@@ -450,6 +473,34 @@ def evaluate_probe_suite(
                 current_total += 1.0
                 future_correct += float((future_count_pred == future_count_target).sum().item())
                 future_total += float(future_count_target.numel())
+                current_pred_rollout.append(current_slot_pred)
+                current_target_rollout.append(sample.slot_state)
+                future_pred_rollout.append(future_slot_pred)
+                future_angle_sum, future_angle_count = slot_angle_error_stats_deg(
+                    future_slot_pred,
+                    sample.future_slot_state,
+                )
+                future_angle_error_sum += float(future_angle_sum.item())
+                future_angle_error_count += float(future_angle_count.item())
+                heat_recall_sum, heat_recall_total = heatmap_peak_recall_stats(
+                    future_heat_pred,
+                    sample.future_heatmap,
+                    sample.future_count,
+                    tolerance_bins=2,
+                )
+                future_heat_recall_sum += float(heat_recall_sum.item())
+                future_heat_recall_total += float(heat_recall_total.item())
+                future_heat_contrasts.append(float(heatmap_contrast(future_heat_pred).item()))
+                pred_trend = slot_trend_label_from_sequence(
+                    future_slot_pred,
+                    is_logits=True,
+                )
+                target_trend = slot_trend_label_from_sequence(
+                    sample.future_slot_state,
+                    is_logits=False,
+                )
+                trend_correct += float(pred_trend == target_trend)
+                trend_total += 1.0
                 if sample.transition_start_index is not None:
                     transition_slice = slice(sample.transition_start_index, None)
                     transition_pred = future_count_pred[transition_slice]
@@ -458,6 +509,21 @@ def evaluate_probe_suite(
                     transition_total += float(transition_target.numel())
             current_acc = current_correct / max(current_total, 1.0)
             future_frame_acc = future_correct / max(future_total, 1.0)
+            current_roll_ratio, current_roll_pred_range, _, _ = primary_slot_range_stats(
+                torch.stack(current_pred_rollout, dim=0),
+                torch.stack(current_target_rollout, dim=0),
+                pred_is_logits=True,
+                target_is_logits=False,
+            )
+            future_range_ratios: list[float] = []
+            for sample, future_slot_pred in zip(samples, future_pred_rollout, strict=True):
+                future_range_ratio, _, _, _ = primary_slot_range_stats(
+                    future_slot_pred,
+                    sample.future_slot_state,
+                    pred_is_logits=True,
+                    target_is_logits=False,
+                )
+                future_range_ratios.append(float(future_range_ratio.item()))
             metrics[f"probe/{scenario}/current_count_acc"] = current_acc
             metrics[f"probe/{scenario}/future_count_frame_acc"] = future_frame_acc
             if transition_total > 0.0:
@@ -467,10 +533,36 @@ def evaluate_probe_suite(
             else:
                 transition_acc = future_frame_acc
                 scenario_score = future_frame_acc
+            future_angle_mae = future_angle_error_sum / max(future_angle_error_count, 1.0)
+            future_angle_score = max(0.0, 1.0 - future_angle_mae / 45.0)
+            future_heat_peak_recall = future_heat_recall_sum / max(future_heat_recall_total, 1.0)
+            trend_from_slots = trend_correct / max(trend_total, 1.0)
+            future_primary_range_ratio = sum(future_range_ratios) / max(len(future_range_ratios), 1)
+            future_heatmap_contrast = sum(future_heat_contrasts) / max(len(future_heat_contrasts), 1)
+            geometry_scenario_score = (
+                0.30 * transition_acc
+                + 0.25 * trend_from_slots
+                + 0.25 * future_angle_score
+                + 0.20 * future_heat_peak_recall
+            )
             metrics[f"probe/{scenario}/transition_count_frame_acc"] = transition_acc
             metrics[f"probe/{scenario}/scenario_score"] = scenario_score
+            metrics[f"probe/{scenario}/geometry_scenario_score"] = geometry_scenario_score
+            metrics[f"probe/{scenario}/current_primary_roll_range_deg"] = float(
+                current_roll_pred_range.item()
+            )
+            metrics[f"probe/{scenario}/current_primary_roll_ratio"] = float(current_roll_ratio.item())
+            metrics[f"probe/{scenario}/future_primary_range_ratio"] = future_primary_range_ratio
+            metrics[f"probe/{scenario}/future_slot_angle_mae_deg"] = future_angle_mae
+            metrics[f"probe/{scenario}/future_angle_score"] = future_angle_score
+            metrics[f"probe/{scenario}/future_heatmap_peak_recall_at_2"] = future_heat_peak_recall
+            metrics[f"probe/{scenario}/future_heatmap_contrast"] = future_heatmap_contrast
+            metrics[f"probe/{scenario}/trend_from_future_slots"] = trend_from_slots
             count_scores.extend([current_acc, future_frame_acc])
             scenario_scores.append(scenario_score)
+            trend_scores.append(trend_from_slots)
+            future_angle_scores.append(future_angle_score)
+            future_heatmap_scores.append(future_heat_peak_recall)
     if was_training:
         model.train()
     metrics["probe/checkpoint_score"] = (
@@ -479,6 +571,21 @@ def evaluate_probe_suite(
     metrics["probe/count_score"] = sum(count_scores) / len(count_scores) if count_scores else 0.0
     metrics["probe/transition_count_score"] = (
         sum(transition_scores) / len(transition_scores) if transition_scores else 0.0
+    )
+    metrics["probe/trend_from_slots_score"] = (
+        sum(trend_scores) / len(trend_scores) if trend_scores else 0.0
+    )
+    metrics["probe/future_angle_score"] = (
+        sum(future_angle_scores) / len(future_angle_scores) if future_angle_scores else 0.0
+    )
+    metrics["probe/future_heatmap_score"] = (
+        sum(future_heatmap_scores) / len(future_heatmap_scores) if future_heatmap_scores else 0.0
+    )
+    metrics["probe/geometry_checkpoint_score"] = (
+        0.30 * metrics["probe/transition_count_score"]
+        + 0.25 * metrics["probe/trend_from_slots_score"]
+        + 0.25 * metrics["probe/future_angle_score"]
+        + 0.20 * metrics["probe/future_heatmap_score"]
     )
     return metrics
 

@@ -30,6 +30,10 @@ loss_future_slot_deactivate_weight: 1.0
 loss_slot_count_consistency_weight: 0.0
 loss_future_slot_count_consistency_weight: 0.0
 loss_future_slot_count_transition_weight: 1.0
+loss_current_heat_kl_weight: 0.5
+loss_future_heat_kl_weight: 0.75
+loss_future_slot_delta_weight: 1.0
+loss_slot_heat_consistency_weight: 0.5
 probe_validation: false
 probe_scenarios: []
 probe_animation_steps: 24

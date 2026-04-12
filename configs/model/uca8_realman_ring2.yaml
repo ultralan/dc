@@ -13,3 +13,7 @@ model_dim: 256
 tcn_kernel_size: 3
 tcn_dilations: [1, 2, 4, 8, 16, 32]
 dropout: 0.1
+slot_decoder_attention_heads: 4
+future_decoder_layers: 2
+future_decoder_dropout: 0.1
+use_slot_context_in_future_decoder: true
