@@ -8,6 +8,7 @@ from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
+from pathlib import PurePosixPath
 from typing import Any
 
 import numpy as np
@@ -75,6 +76,19 @@ def _find_angle_column(row: dict[str, str]) -> str:
         if key.startswith("angle"):
             return key
     raise KeyError("Could not find angle column in RealMAN CSV row.")
+
+
+def _canonical_rel_key_from_csv_filename(filename: str) -> str:
+    parts = PurePosixPath(filename.replace("\\", "/")).parts
+    for anchor in ("ma_noisy_speech", "ma_speech", "dp_speech"):
+        if anchor in parts:
+            anchor_index = parts.index(anchor)
+            rel_parts = parts[anchor_index + 1 :]
+            if rel_parts:
+                return "/".join(rel_parts)
+    if len(parts) >= 4:
+        return "/".join(parts[-4:])
+    return "/".join(parts)
 
 
 def _stable_hash(value: str, seed: int) -> str:
@@ -256,17 +270,22 @@ class RealMANRing2Dataset(Dataset[dict[str, Any]]):
         return records
 
     def _scan_records(self) -> list[RealMANRecord]:
-        moving_rows = {row["filename"]: row for row in _read_location_csv(self.moving_csv)}
-        static_rows = {row["filename"]: row for row in _read_location_csv(self.static_csv)}
+        moving_rows = {
+            _canonical_rel_key_from_csv_filename(row["filename"]): row
+            for row in _read_location_csv(self.moving_csv)
+        }
+        static_rows = {
+            _canonical_rel_key_from_csv_filename(row["filename"]): row
+            for row in _read_location_csv(self.static_csv)
+        }
         records: list[RealMANRecord] = []
         for dp_path in sorted(
             path for path in self.root_dir.rglob("*.flac") if "_CH" not in path.name
         ):
             rel_path = dp_path.relative_to(self.root_dir)
             rel = rel_path.as_posix()
-            key = f"val/ma_noisy_speech/{rel}"
-            motion = "moving" if "/moving/" in key else "static"
-            row = moving_rows.get(key) if motion == "moving" else static_rows.get(key)
+            motion = rel_path.parts[1] if len(rel_path.parts) >= 2 else ""
+            row = moving_rows.get(rel) if motion == "moving" else static_rows.get(rel)
             if row is None:
                 continue
             if len(rel_path.parts) < 4:

@@ -96,6 +96,64 @@ class RealMANDatasetTests(unittest.TestCase):
             train_ids_again = [record.sample_id for record in train_dataset_again.records]
             self.assertEqual(train_ids, train_ids_again)
 
+    def test_csv_filename_prefixes_are_normalized(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "ring2_8ch"
+            moving_csv = Path(temp_dir) / "moving.csv"
+            static_csv = Path(temp_dir) / "static.csv"
+
+            moving_dir = root / "Auditorium" / "moving" / "SPK1"
+            moving_dir.mkdir(parents=True, exist_ok=True)
+            moving_utt = "TRAIN_M_AUDI_SPK1_0001"
+            (moving_dir / f"{moving_utt}.flac").touch()
+            for channel_id in range(9, 17):
+                (moving_dir / f"{moving_utt}_CH{channel_id}.flac").touch()
+
+            static_dir = root / "OfficeRoom3" / "static" / "SPK2"
+            static_dir.mkdir(parents=True, exist_ok=True)
+            static_utt = "VAL_S_OFR3_SPK2_0001"
+            (static_dir / f"{static_utt}.flac").touch()
+            for channel_id in range(9, 17):
+                (static_dir / f"{static_utt}_CH{channel_id}.flac").touch()
+
+            write_location_csv(
+                moving_csv,
+                [
+                    {
+                        "filename": f"train/ma_speech/Auditorium/moving/SPK1/{moving_utt}.flac",
+                        "angle(fake)": "30.0",
+                        "distance": "1.5",
+                        "ele": "0.0",
+                    }
+                ],
+            )
+            write_location_csv(
+                static_csv,
+                [
+                    {
+                        "filename": (
+                            f"val/ma_noisy_speech/OfficeRoom3/static/SPK2/{static_utt}.flac"
+                        ),
+                        "angle(fake)": "45.0",
+                        "distance": "1.8",
+                        "ele": "0.0",
+                    }
+                ],
+            )
+
+            dataset = RealMANRing2Dataset(
+                root_dir=root,
+                moving_csv=moving_csv,
+                static_csv=static_csv,
+                split="all",
+                use_manifest_cache=False,
+            )
+
+            self.assertEqual(len(dataset), 2)
+            sample_ids = [record.sample_id for record in dataset.records]
+            self.assertIn("Auditorium:moving:TRAIN_M_AUDI_SPK1_0001", sample_ids)
+            self.assertIn("OfficeRoom3:static:VAL_S_OFR3_SPK2_0001", sample_ids)
+
 
 if __name__ == "__main__":
     unittest.main()
