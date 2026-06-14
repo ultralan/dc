@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+"""解析远场阵列渲染.
+
+该模块根据声源方位角轨迹和麦克风阵列坐标, 用简单远场平面波延迟模型生成
+多通道观测波形. 它主要服务 synthetic/curriculum/probe 数据, 不代表真实房间声学.
+"""
+
 import math
 from collections.abc import Sequence
 
@@ -8,6 +14,10 @@ import torch.nn.functional as F
 
 
 def fractional_delay(signal: torch.Tensor, delay_samples: torch.Tensor) -> torch.Tensor:
+    """对一维信号施加小数采样点延迟.
+
+    使用线性插值近似非整数延迟. 输入输出长度保持不变.
+    """
     signal = signal.to(dtype=torch.float32)
     delay = float(delay_samples.item())
     num_samples = int(signal.shape[0])
@@ -32,6 +42,17 @@ def render_farfield_history_waveform(
     source_gains: Sequence[float] | None = None,
     source_offsets: Sequence[int] | None = None,
 ) -> torch.Tensor:
+    """按远场模型渲染历史窗口多通道波形.
+
+    参数:
+        mono_waveforms: 每个声源的一维源信号.
+        theta_history: 每帧每个声源的方位角, ``[T]`` 或 ``[T, S]``.
+        mic_positions: 麦克风坐标, ``[C, 3]``.
+        source_activity: 可选活动矩阵, ``[T, S]``.
+
+    返回:
+        多通道观测波形, 形状 ``[C, T * hop_length]``.
+    """
     if theta_history.ndim == 1:
         theta_history = theta_history.unsqueeze(-1)
     history_frames = int(theta_history.shape[0])
@@ -64,6 +85,8 @@ def render_farfield_history_waveform(
     output = torch.zeros(mic_positions.shape[0], total_samples + win_length, dtype=torch.float32)
     normalizer = torch.zeros(total_samples + win_length, dtype=torch.float32)
     window = torch.hann_window(win_length)
+
+    # 预先保证每个源音频足够长, 避免逐帧循环里反复 pad.
     required_samples = total_samples + win_length + max(offsets, default=0)
     prepared_waveforms: list[torch.Tensor] = []
     for source_idx in range(num_sources):
@@ -92,12 +115,16 @@ def render_farfield_history_waveform(
                 [math.cos(theta_value), math.sin(theta_value), 0.0],
                 dtype=torch.float32,
             )
+
+            # 平面波远场延迟: mic_position 在入射方向上的投影 / 声速.
             delays = (mic_positions @ direction) / sound_speed * sample_rate
             for mic_idx in range(mic_positions.shape[0]):
                 delayed = fractional_delay(frame, delays[mic_idx])
                 output[mic_idx, start : start + win_length] += delayed
         if frame_has_signal:
             normalizer[start : start + win_length] += window.pow(2)
+
+    # overlap-add 后按窗能量归一化, 避免帧重叠区域音量偏大.
     output = output[:, :total_samples] / normalizer[:total_samples].clamp_min(1e-4)
     peak = float(output.abs().amax().item())
     if peak > 1.0:

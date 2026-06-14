@@ -64,6 +64,60 @@ RealMAN 的目标就是提供足够大、足够真实、带标注的多通道数
 - 用多种子阵列训练，可在未见过的阵列上获得更好表现
 - 数据集足以支撑动态定位和动态增强任务
 
+## 6A. 官方 baseline、指标与代表结果
+
+RealMAN 论文的 baseline 分成两类任务。
+
+### 6A.1 Speech enhancement baseline
+
+增强任务使用两个代表模型：
+
+- `FaSNet-TAC`：时域多通道语音分离/增强模型，强调麦克风数量和通道排列不变性
+- `SpatialNet`：频域多通道语音增强模型，强调空间信息学习
+
+评价指标包括：
+
+- `WB-PESQ`：语音质量，越大越好
+- `SI-SDR`：信号失真比，越大越好
+- `MOS-SIG / MOS-BAK / MOS-OVR`：DNSMOS 语音、背景、总体质量，越大越好
+- `CER`：中文识别字错误率，越小越好
+
+从论文结果看，`SpatialNet + real speech + real noise` 整体最好。  
+代表结果是：
+
+- 静态源：`WB-PESQ 2.10`，`SI-SDR 6.1`，`MOS-OVR 2.62`，`CER 16.0`
+- 移动源：`WB-PESQ 1.90`，`SI-SDR 3.8`，`MOS-OVR 2.52`，`CER 21.5`
+
+这说明真实数据训练对多通道增强任务非常关键，也说明多通道空间信息显式建模是有效方向。
+
+### 6A.2 Sound source localization baseline
+
+定位任务使用两个代表模型：
+
+- `CRNN`：RealMAN 论文内定义的定位基线，由多层 CNN 和 GRU 组成，输出 azimuth spatial spectrum
+- `IPDnet`：学习 direct-path IPD 的定位网络，支持 fixed-array 和 variable-array 设置
+
+评价指标包括：
+
+- `MAE [°]`：方位角平均绝对误差，越小越好
+- `ACC(5°) [%]`：误差小于 `5°` 的帧比例，越大越好
+
+CRNN 的 sim-vs-real 对比中，`real speech + real noise` 最好：
+
+- 静态源：`ACC(5°) 88.4%`，`MAE 4.6°`
+- 移动源：`ACC(5°) 83.9%`，`MAE 4.3°`
+
+IPDnet 的阵列实验中，`Fixed-Array IPDnet` 在移动源上表现最好：
+
+- 移动源：`ACC(5°) 88.9%`，`MAE 2.7°`
+
+`Variable-Array IPDnet` 的意义则在于验证子阵列/可变阵列训练路线：
+
+- 静态源：`ACC(5°) 86.1%`，`MAE 3.5°`
+- 移动源：`ACC(5°) 80.4%`，`MAE 3.6°`
+
+这对当前项目很关键：RealMAN 官方 baseline 本身也在利用 `spatial spectrum`、`IPD`、`direct-path phase difference` 这类空间先验，并没有走纯 raw waveform 端到端路线。
+
 ## 7. 对当前项目的直接借鉴
 
 ### 7.1 它是当前最贴设备的数据来源
@@ -113,3 +167,6 @@ RealMAN 不只是可用于“固定 8 麦训练”，还适合进一步做：
 - arXiv：<https://arxiv.org/abs/2406.19959>
 - GitHub：<https://github.com/Audio-WestlakeU/RealMAN>
 - Hugging Face 数据集：<https://huggingface.co/datasets/AISHELL/RealMAN>
+- FaSNet-TAC：<https://doi.org/10.1109/ICASSP40776.2020.9054177>
+- SpatialNet：<https://doi.org/10.1109/TASLP.2024.3357036>
+- IPDnet：<https://arxiv.org/abs/2405.07021>

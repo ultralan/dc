@@ -1,5 +1,13 @@
 from __future__ import annotations
 
+"""slot-based 跟踪指标和辅助统计.
+
+模型的 slot 输出格式为 ``[activity, sin(theta), cos(theta), rho, omega]``.
+本文件提供围绕 slot 的计数、活动检测、角度误差、趋势和热力图诊断指标.
+这些指标主要用于扩展任务和消融分析, RealMAN 主定位 MAE/ACC@5 见
+``realman_ssl_metrics.py``.
+"""
+
 import math
 
 import torch
@@ -11,6 +19,7 @@ def _validate_slot_state_shapes(
     pred_slot_state: torch.Tensor,
     target_slot_state: torch.Tensor,
 ) -> None:
+    """校验预测和标签 slot_state 的形状是否一致."""
     if pred_slot_state.shape != target_slot_state.shape:
         raise ValueError("pred_slot_state and target_slot_state must have the same shape.")
     if pred_slot_state.shape[-1] < 3:
@@ -23,6 +32,7 @@ def slot_activity_mask(
     is_logits: bool,
     threshold: float = 0.5,
 ) -> torch.Tensor:
+    """根据 activity 通道得到活跃 slot mask."""
     activity = torch.sigmoid(slot_state[..., 0]) if is_logits else slot_state[..., 0]
     return activity > threshold
 
@@ -33,6 +43,7 @@ def slot_angles_deg(
     is_logits: bool,
     threshold: float = 0.5,
 ) -> torch.Tensor:
+    """从 slot_state 的 sin/cos 通道还原角度, 非活跃 slot 置为 NaN."""
     activity = torch.sigmoid(slot_state[..., 0]) if is_logits else slot_state[..., 0]
     angles_deg = torch.atan2(slot_state[..., 1], slot_state[..., 2]) * (180.0 / math.pi)
     return angles_deg.masked_fill(activity <= threshold, float("nan"))
@@ -44,6 +55,7 @@ def slot_count_from_state(
     is_logits: bool,
     threshold: float = 0.5,
 ) -> torch.Tensor:
+    """统计每帧活跃 slot 数量."""
     return (
         slot_activity_mask(
             slot_state,
@@ -61,6 +73,7 @@ def slot_count_accuracy_stats(
     *,
     threshold: float = 0.5,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    """计算 slot 数量预测正确数和总数."""
     _validate_slot_state_shapes(pred_slot_state, target_slot_state)
     pred_count = slot_count_from_state(pred_slot_state, is_logits=True, threshold=threshold)
     target_count = slot_count_from_state(target_slot_state, is_logits=False, threshold=threshold)
@@ -75,6 +88,7 @@ def slot_activity_confusion_stats(
     *,
     threshold: float = 0.5,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """统计 slot activity 的 TP/FP/FN."""
     _validate_slot_state_shapes(pred_slot_state, target_slot_state)
     pred_active = slot_activity_mask(pred_slot_state, is_logits=True, threshold=threshold)
     target_active = slot_activity_mask(target_slot_state, is_logits=False, threshold=threshold)
@@ -85,6 +99,11 @@ def slot_activity_confusion_stats(
 
 
 def angle_range_deg(values_deg: torch.Tensor) -> torch.Tensor:
+    """计算一段角度序列的展开后范围.
+
+    输入可以包含 NaN, NaN 会被忽略. 角度差按环形空间展开,
+    避免 -180/180 边界造成范围虚高.
+    """
     values_deg = values_deg.to(dtype=torch.float32)
     valid = torch.isfinite(values_deg)
     if int(valid.sum().item()) < 2:
@@ -104,6 +123,11 @@ def primary_slot_index_from_sequence(
     is_logits: bool,
     threshold: float = 0.5,
 ) -> int | None:
+    """从一段 slot 序列中选择主 slot.
+
+    主 slot 优先选择角度变化范围较大的活跃 slot, 用于评估主要运动目标.
+    如果整段都没有活跃 slot, 返回 ``None``.
+    """
     if slot_state.ndim != 3:
         raise ValueError("slot_state must have shape [frames, slots, features].")
     activity = torch.sigmoid(slot_state[..., 0]) if is_logits else slot_state[..., 0]
@@ -135,6 +159,11 @@ def primary_slot_range_stats(
     target_is_logits: bool,
     threshold: float = 0.5,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int | None]:
+    """比较预测和标签主 slot 的运动范围.
+
+    返回 ``(ratio, pred_range, target_range, slot_idx)``.
+    ratio 接近 1 表示预测运动幅度接近标签.
+    """
     if pred_slot_state.shape != target_slot_state.shape:
         raise ValueError("pred_slot_state and target_slot_state must have the same shape.")
     slot_idx = primary_slot_index_from_sequence(
@@ -164,6 +193,13 @@ def slot_trend_label_from_sequence(
     threshold: float = 0.5,
     stable_threshold_deg: float = 5.0,
 ) -> int:
+    """根据主 slot 的总角位移生成趋势标签.
+
+    返回:
+    - ``-1``: 顺时针/角度减小;
+    - ``0``: 稳定;
+    - ``1``: 逆时针/角度增大.
+    """
     slot_idx = primary_slot_index_from_sequence(slot_state, is_logits=is_logits, threshold=threshold)
     if slot_idx is None:
         return 0
@@ -185,6 +221,7 @@ def slot_angle_error_stats_deg(
     pred_slot_state: torch.Tensor,
     target_slot_state: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    """累计活跃 slot 的角度误差和有效样本数."""
     _validate_slot_state_shapes(pred_slot_state, target_slot_state)
     active_mask = target_slot_state[..., 0] > 0.5
     if not torch.any(active_mask):
@@ -202,6 +239,7 @@ def future_slot_delta_error_stats_deg(
     pred_slot_state: torch.Tensor,
     target_slot_state: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    """累计未来相邻帧角位移误差和有效样本数."""
     _validate_slot_state_shapes(pred_slot_state, target_slot_state)
     active_mask = (target_slot_state[..., 0][..., 1:, :] > 0.5) & (
         target_slot_state[..., 0][..., :-1, :] > 0.5
@@ -226,6 +264,11 @@ def heatmap_peak_recall_stats(
     *,
     tolerance_bins: int = 2,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    """计算 heatmap 峰值召回.
+
+    对每帧取标签 heatmap 的 top-k 峰值, k 来自目标声源数.
+    如果预测 top-k 峰值在 ``tolerance_bins`` 内命中标签峰, 视为召回.
+    """
     if pred_heatmap.shape != target_heatmap.shape:
         raise ValueError("pred_heatmap and target_heatmap must have the same shape.")
     bins = pred_heatmap.shape[-1]
@@ -255,6 +298,7 @@ def heatmap_peak_recall_stats(
 
 
 def heatmap_contrast(heatmap: torch.Tensor) -> torch.Tensor:
+    """计算 heatmap 峰值和均值的平均差, 用于观察热力图是否有清晰峰."""
     if heatmap.numel() == 0:
         return heatmap.new_tensor(0.0)
     contrast = heatmap.amax(dim=-1) - heatmap.mean(dim=-1)

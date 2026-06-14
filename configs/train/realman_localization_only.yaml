@@ -1,0 +1,39 @@
+batch_size: 4
+val_batch_size: 8
+num_workers: 0
+max_epochs: 2
+limit_train_steps: 480
+learning_rate: 0.0003
+weight_decay: 0.01
+gradient_clip_val: 1.0
+run_validation: false
+validate_every_n_steps: 0
+metric_for_best_checkpoint: val/heatmap_argmax_mae_deg
+metric_mode: min
+early_stopping_patience: 0
+early_stopping_min_delta: 0.0
+resume_from: null
+force_resume: false
+pin_memory: false
+persistent_workers: false
+prefetch_factor: null
+log_every_n_steps: 20
+save_every_n_steps: 0
+output_root: ${hydra:runtime.cwd}/runs
+
+# Train only the current-frame localization objective while keeping the
+# existing model structure intact.
+loss_count_weight: 0.0
+loss_heat_weight: 4.0
+loss_heat_pos_weight: 6.0
+loss_current_heat_kl_weight: 2.0
+loss_track_weight: 0.0
+loss_slot_count_consistency_weight: 0.0
+loss_slot_heat_consistency_weight: 0.0
+loss_future_count_weight: 0.0
+loss_future_heat_weight: 0.0
+loss_future_heat_kl_weight: 0.0
+loss_future_track_weight: 0.0
+loss_future_slot_count_consistency_weight: 0.0
+loss_future_slot_delta_weight: 0.0
+loss_motion_weight: 0.0

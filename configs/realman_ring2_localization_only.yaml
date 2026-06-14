@@ -1,0 +1,10 @@
+defaults:
+  - model: uca8_realman_ring2
+  - data: realman_ring2
+  - feature: stft_16k
+  - train: realman_localization_only
+  - runtime: local
+  - _self_
+
+experiment_name: realman_ring2_localization_only
+seed: 42

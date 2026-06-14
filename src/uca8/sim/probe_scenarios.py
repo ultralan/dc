@@ -1,5 +1,12 @@
 from __future__ import annotations
 
+"""可控 probe 场景生成与评估.
+
+probe 场景不是训练主数据, 而是用来回答“模型是否具备某类能力”的小型可解释测试:
+静态定位、单源移动、反向运动、双源交叉、声源进入、声源离开等.
+场景轨迹由解析规则生成, 音频由真实单声道源通过远场阵列渲染得到.
+"""
+
 import math
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,6 +39,12 @@ SCENARIO_CHOICES = (
 
 @dataclass(slots=True)
 class ProbeSample:
+    """一个 probe 样本.
+
+    字段基本对齐训练数据集的 ``__getitem__`` 输出, 额外保存了场景真值轨迹,
+    方便可视化和诊断.
+    """
+
     sample_id: str
     waveform: torch.Tensor
     vad_history: torch.Tensor
@@ -49,6 +62,7 @@ class ProbeSample:
 
 
 def default_source_audio(root_dir: Path) -> Path:
+    """从 RealMAN 目录中选择一个 direct-path 音频作为 probe 源音频."""
     candidates = sorted(path for path in root_dir.rglob("*.flac") if "_CH" not in path.name)
     if not candidates:
         raise FileNotFoundError(f"No direct-path source audio found under {root_dir}.")
@@ -61,6 +75,7 @@ def load_probe_mono_audio(
     sample_rate: int,
     cache_dir: str | Path | None = None,
 ) -> torch.Tensor:
+    """读取并归一化 probe 使用的单声道源音频."""
     waveform, _ = load_audio_file(
         source_audio,
         target_sample_rate=sample_rate,
@@ -72,6 +87,7 @@ def load_probe_mono_audio(
 
 
 def _linspace_deg(start_deg: float, stop_deg: float, steps: int) -> torch.Tensor:
+    """按角度端点生成弧度序列."""
     if steps <= 0:
         return torch.zeros(0, dtype=torch.float32)
     if steps == 1:
@@ -88,6 +104,7 @@ def _fill_source(
     distance_m: float,
     active: torch.Tensor | None = None,
 ) -> None:
+    """把一个声源的极坐标轨迹写入场景张量."""
     if theta.shape[0] != source_positions.shape[0]:
         raise ValueError("theta length must match total frames.")
     if active is None:
@@ -102,6 +119,7 @@ def transition_start_index(
     *,
     future_frames: int,
 ) -> int | None:
+    """返回进入/离开场景中声源数开始变化的未来帧索引."""
     if scenario not in {"source_enter", "source_leave"}:
         return None
     return max(future_frames // 4, 1)
@@ -111,6 +129,7 @@ def infer_transition_start_index(
     current_count: torch.Tensor,
     future_count: torch.Tensor,
 ) -> int | None:
+    """从 current/future count 标签中反推第一次声源数变化的位置."""
     transitions = torch.nonzero(future_count != current_count, as_tuple=False).flatten()
     if transitions.numel() == 0:
         return None
@@ -125,6 +144,13 @@ def build_scenario(
     max_sources: int = 4,
     distance_m: float = 1.2,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """构造一个解析 probe 场景.
+
+    返回:
+        ``source_positions``: ``[history+future, max_sources, 3]``;
+        ``array_positions``: ``[history+future, 3]``;
+        ``source_activity``: ``[history+future, max_sources]``.
+    """
     total_frames = history_frames + future_frames
     array_positions = torch.zeros(total_frames, 3, dtype=torch.float32)
     source_positions = torch.zeros(total_frames, max_sources, 3, dtype=torch.float32)
@@ -256,6 +282,7 @@ def render_history_waveform(
     win_length: int,
     sound_speed: float,
 ) -> torch.Tensor:
+    """把单声道源音频按 probe 轨迹渲染成多通道历史输入."""
     num_sources = int(theta_history.shape[-1]) if theta_history.ndim > 1 else 1
     return render_farfield_history_waveform(
         mono_waveforms=[mono_waveform for _ in range(num_sources)],
@@ -283,6 +310,11 @@ def build_probe_sample(
     num_heatmap_bins: int,
     max_sources: int,
 ) -> ProbeSample:
+    """构造单个 probe 样本.
+
+    该函数生成完整历史+未来轨迹, 渲染历史音频, 再调用 ``TrackTrendLabelBuilder``
+    构造和训练数据一致的监督标签.
+    """
     source_positions, array_positions, source_activity = build_scenario(
         scenario=scenario,
         history_frames=history_frames,
@@ -351,6 +383,7 @@ def build_probe_rollout_samples(
     max_sources: int,
     animation_steps: int,
 ) -> list[ProbeSample]:
+    """构造一组滑动窗口 probe 样本, 用于动画/rollout 评估."""
     total_frames = history_frames + future_frames + animation_steps - 1
     source_positions, array_positions, source_activity = build_scenario(
         scenario=scenario,
@@ -423,6 +456,15 @@ def evaluate_probe_suite(
     probe_samples: dict[str, list[ProbeSample]],
     device: torch.device,
 ) -> dict[str, float]:
+    """在 probe suite 上评估模型.
+
+    评估项覆盖:
+    - 当前/未来声源数准确率;
+    - 进入/离开场景的 transition count 准确率;
+    - future slot 角度 MAE;
+    - future heatmap 峰值召回;
+    - slot 推断出的运动趋势.
+    """
     if not probe_samples:
         return {}
     was_training = model.training
@@ -591,6 +633,7 @@ def evaluate_probe_suite(
 
 
 def summarize_probe_suite(probe_samples: dict[str, list[ProbeSample]]) -> dict[str, Any]:
+    """生成 probe suite 的轻量摘要, 用于日志输出."""
     return {
         scenario: {
             "num_windows": len(samples),

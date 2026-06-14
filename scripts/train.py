@@ -1,3 +1,15 @@
+"""UCA8声源定位-跟踪-趋势预测模型训练入口.
+
+训练流程:
+  1. Hydra加载YAML配置 → 2. 构建数据集/模型/损失/优化器 → 3. Lightning Fabric分布式训练
+  4. 周期性验证(eval + probe场景) → 5. 保存best/last检查点
+
+启动方式:
+  python scripts/train.py                                    # 默认配置
+  python scripts/train.py +experiment=realman_ring2_mvp      # RealMAN MVP实验
+  python scripts/train.py train.resume_from=runs/.../best.pt # 断点续训
+"""
+
 from __future__ import annotations
 
 import json
@@ -19,9 +31,13 @@ from uca8.geometry.uca8 import make_uniform_circular_array
 from uca8.losses.multi_task_loss import TrackTrendMultiTaskLoss
 from uca8.metrics import (
     future_slot_delta_error_stats_deg,
+    heatmap_localization_stats,
+    localization_acc5,
+    localization_mae_deg,
     slot_activity_confusion_stats,
     slot_angle_error_stats_deg,
     slot_count_accuracy_stats,
+    slot_primary_localization_stats,
 )
 from uca8.models.tracktrend_net import UCA8TrackTrendNet
 from uca8.sim import (
@@ -45,6 +61,7 @@ except Exception as exc:  # pragma: no cover - exercised only in runtime environ
 
 
 def seed_everything(seed: int, *, deterministic: bool) -> None:
+    """全局随机种子设定, 确保可复现性."""
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -99,6 +116,7 @@ def build_dataset(
     *,
     split_override: str | None = None,
 ) -> torch.utils.data.Dataset:
+    """根据配置构建数据集, 支持4种类型: synthetic / realman_ring2 / realman_ring2_hybrid / locata_like."""
     if cfg.data.dataset_kind == "synthetic":
         return SyntheticTrackTrendDataset(
             size=cfg.data.synthetic_size,
@@ -210,6 +228,7 @@ def build_dataloader(
     train: bool,
     seed: int,
 ) -> DataLoader:
+    """构建DataLoader, 训练时shuffle, 验证时不shuffle."""
     generator = torch.Generator()
     generator.manual_seed(seed)
     num_workers = int(cfg.train.num_workers)
@@ -235,6 +254,7 @@ def build_probe_samples(
     *,
     mic_positions: torch.Tensor,
 ) -> dict[str, list[Any]]:
+    """构建probe验证场景: 合成预设运动轨迹(静止/弧形/交叉/进出), 用于评估几何感知能力."""
     if not bool(cfg.train.get("probe_validation", False)):
         return {}
     root_dir = Path(str(cfg.data.root_dir))
@@ -299,8 +319,9 @@ def evaluate(
     model: torch.nn.Module,
     criterion: TrackTrendMultiTaskLoss,
     dataloader: DataLoader,
-    phase: str,
+    phase: str,  # "val" 或 "train"
 ) -> dict[str, float]:
+    """验证集评估: 计算全部损失分量 + 槽位精度/F1/角度MAE/趋势准确率等指标."""
     model.eval()
     metric_keys = (
         "loss",
@@ -344,6 +365,16 @@ def evaluate(
     future_slot_tp = 0.0
     future_slot_fp = 0.0
     future_slot_fn = 0.0
+    heatmap_loc_error_sum = 0.0
+    heatmap_loc_acc5_sum = 0.0
+    heatmap_loc_total = 0.0
+    slot_primary_loc_error_sum = 0.0
+    slot_primary_loc_acc5_sum = 0.0
+    slot_primary_loc_total = 0.0
+    motion_groups = {
+        "static": {"error": 0.0, "acc5": 0.0, "total": 0.0},
+        "moving": {"error": 0.0, "acc5": 0.0, "total": 0.0},
+    }
     with torch.no_grad():
         for batch in dataloader:
             predictions = model(batch["waveform"], batch["vad_history"])
@@ -416,6 +447,34 @@ def evaluate(
             current_slot_tp += float(current_tp.item())
             current_slot_fp += float(current_fp.item())
             current_slot_fn += float(current_fn.item())
+            heatmap_loc_stats = heatmap_localization_stats(
+                predictions["heatmap_logits"],
+                batch["slot_state"],
+            )
+            slot_primary_loc_stats = slot_primary_localization_stats(
+                predictions["slot_logits"],
+                batch["slot_state"],
+            )
+            heatmap_loc_error_sum += float(heatmap_loc_stats.error_sum_deg.item())
+            heatmap_loc_acc5_sum += float(heatmap_loc_stats.acc5_count.item())
+            heatmap_loc_total += float(heatmap_loc_stats.total.item())
+            slot_primary_loc_error_sum += float(slot_primary_loc_stats.error_sum_deg.item())
+            slot_primary_loc_acc5_sum += float(slot_primary_loc_stats.acc5_count.item())
+            slot_primary_loc_total += float(slot_primary_loc_stats.total.item())
+            sample_ids = batch.get("sample_id")
+            if sample_ids is not None:
+                for item_idx, sample_id in enumerate(sample_ids):
+                    parts = str(sample_id).split(":")
+                    if len(parts) < 2 or parts[1] not in motion_groups:
+                        continue
+                    item_stats = heatmap_localization_stats(
+                        predictions["heatmap_logits"][item_idx : item_idx + 1],
+                        batch["slot_state"][item_idx : item_idx + 1],
+                    )
+                    group = motion_groups[parts[1]]
+                    group["error"] += float(item_stats.error_sum_deg.item())
+                    group["acc5"] += float(item_stats.acc5_count.item())
+                    group["total"] += float(item_stats.total.item())
             future_tp, future_fp, future_fn = slot_activity_confusion_stats(
                 future_slot_logits,
                 future_slot_target,
@@ -463,6 +522,31 @@ def evaluate(
         future_slot_delta_active,
         1.0,
     )
+    metrics[f"{phase}/heatmap_argmax_mae_deg"] = heatmap_loc_error_sum / max(
+        heatmap_loc_total,
+        1.0,
+    )
+    metrics[f"{phase}/heatmap_argmax_acc5"] = heatmap_loc_acc5_sum / max(
+        heatmap_loc_total,
+        1.0,
+    )
+    metrics[f"{phase}/slot_primary_mae_deg"] = slot_primary_loc_error_sum / max(
+        slot_primary_loc_total,
+        1.0,
+    )
+    metrics[f"{phase}/slot_primary_acc5"] = slot_primary_loc_acc5_sum / max(
+        slot_primary_loc_total,
+        1.0,
+    )
+    for motion_name, group in motion_groups.items():
+        metrics[f"{phase}/{motion_name}_heatmap_argmax_mae_deg"] = group["error"] / max(
+            group["total"],
+            1.0,
+        )
+        metrics[f"{phase}/{motion_name}_heatmap_argmax_acc5"] = group["acc5"] / max(
+            group["total"],
+            1.0,
+        )
     return metrics
 
 
@@ -565,6 +649,12 @@ def guard_resume_target(
 
 @hydra.main(version_base=None, config_path="../configs", config_name="config")
 def main(cfg: DictConfig) -> None:
+    """训练主函数: 配置加载 → 数据准备 → 模型构建 → 训练循环 → 检查点保存.
+
+    核心训练循环:
+      for epoch → for batch → forward → loss → backward → grad_clip → step
+      定期验证 + probe评估 + early stopping + 检查点保存
+    """
     deterministic = bool(cfg.runtime.get("deterministic", False))
     matmul_precision = cfg.runtime.get("matmul_precision")
     if matmul_precision:
@@ -605,6 +695,7 @@ def main(cfg: DictConfig) -> None:
         num_mics=cfg.model.num_input_channels,
         radius=float(cfg.model.array_radius_m),
     )
+    # 构建UCA8TrackTrendNet模型: 前端 + 三路编码器 + TCN骨干 + 多头解码
     model = UCA8TrackTrendNet(
         mic_positions=mic_positions,
         sample_rate=cfg.feature.sample_rate,
@@ -631,7 +722,13 @@ def main(cfg: DictConfig) -> None:
         ),
         num_count_classes=cfg.model.num_count_classes,
         sound_speed=cfg.model.sound_speed,
+        use_logmel_ref=bool(cfg.model.get("use_logmel_ref", True)),
+        use_logmel_rms=bool(cfg.model.get("use_logmel_rms", True)),
+        use_ipd=bool(cfg.model.get("use_ipd", True)),
+        use_srp=bool(cfg.model.get("use_srp", True)),
+        use_vad=bool(cfg.model.get("use_vad", True)),
     )
+    # 构建多任务损失: ~15项损失的加权和
     criterion = TrackTrendMultiTaskLoss(
         count_weight=float(cfg.train.get("loss_count_weight", 1.0)),
         heat_weight=float(cfg.train.get("loss_heat_weight", 1.0)),
@@ -669,6 +766,7 @@ def main(cfg: DictConfig) -> None:
             cfg.train.get("loss_slot_heat_consistency_weight", 0.5)
         ),
     )
+    # AdamW优化器 + Lightning Fabric分布式包装
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=float(cfg.train.learning_rate),
@@ -736,6 +834,7 @@ def main(cfg: DictConfig) -> None:
             ),
             encoding="utf-8",
         )
+    # ===== 主训练循环: epoch → batch → forward → backward → step =====
     stop_training = False
     model.train()
     last_step_in_epoch = start_step_in_epoch
@@ -756,10 +855,10 @@ def main(cfg: DictConfig) -> None:
         for step_in_epoch, batch in enumerate(epoch_iterator, start=start_step_in_epoch):
             last_step_in_epoch = step_in_epoch + 1
             optimizer.zero_grad(set_to_none=True)
-            predictions = model(batch["waveform"], batch["vad_history"])
-            loss_dict = criterion(predictions, batch)
-            fabric.backward(loss_dict["loss"])
-            fabric.clip_gradients(model, optimizer, max_norm=float(cfg.train.gradient_clip_val))
+            predictions = model(batch["waveform"], batch["vad_history"])  # 前向传播
+            loss_dict = criterion(predictions, batch)                     # 计算多任务损失
+            fabric.backward(loss_dict["loss"])                            # 反向传播
+            fabric.clip_gradients(model, optimizer, max_norm=float(cfg.train.gradient_clip_val))  # 梯度裁剪
             optimizer.step()
             global_step += 1
             last_loss = float(loss_dict["loss"].detach().item())
@@ -802,6 +901,7 @@ def main(cfg: DictConfig) -> None:
                     f"slot_cnt={train_metrics['future_slot_count_consistency_loss']:.4f} "
                     f"future={train_metrics['future_loss']:.4f}"
                 )
+            # 周期性验证: 在验证集上评估 + 可选probe场景评估
             should_run_validation = val_loader is not None and (
                 (validate_every_n_steps > 0 and global_step % validate_every_n_steps == 0)
                 or global_step == limit_train_steps
@@ -860,6 +960,7 @@ def main(cfg: DictConfig) -> None:
                         mode=secondary_metric_mode,
                         min_delta=early_stopping_min_delta,
                     )
+                # 根据主/次指标判断是否为最佳检查点
                 if improve_best:
                     best_metric = current_metric
                     if secondary_metric_name:
@@ -892,6 +993,7 @@ def main(cfg: DictConfig) -> None:
                     f"val_slot_deg={val_metrics['val/current_slot_angle_mae_deg']:.2f} "
                     f"val_future_delta_deg={val_metrics['val/future_slot_delta_mae_deg']:.2f}"
                 )
+                # Early stopping: 连续多轮未改善则终止训练
                 if (
                     early_stopping_patience > 0
                     and stale_validation_rounds >= early_stopping_patience
@@ -918,6 +1020,7 @@ def main(cfg: DictConfig) -> None:
         start_step_in_epoch = 0
         if stop_training:
             break
+    # 训练结束: 保存last检查点 + 运行摘要
     save_checkpoint(
         path=run_dir / "last.pt",
         fabric=fabric,

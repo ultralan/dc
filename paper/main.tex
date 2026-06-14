@@ -1,0 +1,496 @@
+\documentclass[UTF8,a4paper,11pt]{ctexart}
+
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{geometry}
+\usepackage{hyperref}
+\usepackage{multirow}
+\usepackage{xcolor}
+
+\geometry{left=2.6cm,right=2.6cm,top=2.6cm,bottom=2.6cm}
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue!60!black,
+  citecolor=blue!60!black,
+  urlcolor=blue!60!black
+}
+
+\title{基于可学习空间谱与时序卷积融合的真实多通道声源方位定位方法}
+\author{初稿}
+\date{\today}
+
+\newcommand{\stft}{\operatorname{STFT}}
+\newcommand{\wrap}{\operatorname{wrap}}
+\newcommand{\sigmoid}{\operatorname{sigmoid}}
+\newcommand{\softmax}{\operatorname{softmax}}
+\newcommand{\argmax}{\operatorname*{arg\,max}}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+真实多通道声源定位任务中, 传统 TDOA/SRP-PHAT 方法具有明确的物理可解释性,
+但在真实噪声、移动声源和短时窗波动下容易受到互相关峰不稳定、混响和阵列失配影响。
+另一方面, 直接依赖深度模型从原始波形中自动学习空间关系, 在中小规模实验条件下
+往往需要更多数据和更高训练成本。本文采用折中而可解释的路线:
+在 RealMAN 真实麦克风阵列数据集上, 以第二圈 8 通道子阵列为对象,
+将 log-mel 频谱、IPD 相位差和 SRP-PHAT 空间谱作为输入空间先验,
+再通过三路编码器和因果 TCN 进行短时序融合, 最终输出当前帧方位角 heatmap。
+当前验证结果表明, 在 RealMAN ring2\_8ch 设置下, 该方法在 64 batch 验证子集上达到
+$4.49^\circ$ MAE 和 82.25\% ACC@5, 说明显式空间先验与可学习时序融合是有效的。
+\end{abstract}
+
+\section{引言}
+
+声源方位定位的核心目标是在给定多通道麦克风信号的情况下估计声源到达方向
+(Direction of Arrival, DOA)。经典方法通常从 TDOA、GCC-PHAT 或 SRP-PHAT 出发
+\cite{knapp1976gcc},
+利用麦克风几何关系进行延迟估计或空间扫描。此类方法可解释、轻量,
+但在真实录制环境中会面对混响、噪声、移动声源、语音间歇和阵列响应差异等问题。
+
+RealMAN 数据集提供了真实 32 通道麦克风阵列录音、真实噪声和真实声源位置标注
+\cite{yang2024realman}, 使得模型可以在更接近真实设备落地的条件下评估。
+RealMAN 官方定位 baseline 包括 CRNN spatial spectrum 预测和 IPDnet direct-path IPD
+估计方法 \cite{wang2024ipdnet}, 其指标主要为方位角 MAE 和 ACC@5。
+这说明在真实多通道定位任务中,
+空间谱和 IPD 这类声学先验仍然是主流有效信息, 并非与深度学习路线矛盾。
+
+本文当前故事线聚焦于一个最小而稳定的闭环:
+\begin{quote}
+RealMAN ring2\_8ch 真实子阵列
+$\rightarrow$ log-mel/IPD/SRP-PHAT 空间特征
+$\rightarrow$ 三路 CNN 编码
+$\rightarrow$ 因果 TCN 时序融合
+$\rightarrow$ 当前方位 heatmap 定位。
+\end{quote}
+slot、count、future 和 trend 预测头保留为扩展接口, 但当前论文主结果优先围绕
+当前方位定位展开。
+
+\section{相关工作}
+
+\subsection{TDOA 与 SRP-PHAT}
+
+设第 $i$ 个麦克风位置为 $\mathbf{m}_i\in\mathbb{R}^3$, 声源远场方向为
+$\mathbf{u}(\theta)=[\cos\theta,\sin\theta,0]^\top$, 声速为 $c$。
+远场近似下, 声波到达第 $i$ 个麦克风的相对延迟可写为
+\begin{equation}
+  \tau_i(\theta)=\frac{\mathbf{m}_i^\top \mathbf{u}(\theta)}{c}.
+\end{equation}
+麦克风对 $(i,j)$ 的 TDOA 为
+\begin{equation}
+  \Delta\tau_{ij}(\theta)
+  = \tau_i(\theta)-\tau_j(\theta)
+  = \frac{(\mathbf{m}_i-\mathbf{m}_j)^\top\mathbf{u}(\theta)}{c}.
+\end{equation}
+
+GCC-PHAT 通过归一化互谱估计通道间延迟。给定两个通道的 STFT
+$X_i(t,f)$ 和 $X_j(t,f)$, PHAT 归一化互谱为
+\begin{equation}
+  G_{ij}(t,f)
+  =
+  \frac{X_i(t,f)X_j^*(t,f)}
+       {|X_i(t,f)X_j^*(t,f)|+\epsilon}.
+\end{equation}
+SRP-PHAT 不先显式估计单个 TDOA, 而是对候选方位 $\theta_a$ 进行空间扫描:
+\begin{equation}
+  S(t,\theta_a)
+  =
+  \frac{1}{|\mathcal{P}|\,|\mathcal{F}|}
+  \sum_{(i,j)\in\mathcal{P}}
+  \sum_{f\in\mathcal{F}}
+  \Re\left[
+    G_{ij}(t,f)
+    \exp\left(j2\pi f\Delta\tau_{ij}(\theta_a)\right)
+  \right],
+  \label{eq:srp}
+\end{equation}
+其中 $\mathcal{P}$ 为麦克风对集合, $\mathcal{F}$ 为正频率集合。
+传统 SRP-PHAT baseline 直接取
+\begin{equation}
+  \hat{\theta}_{\mathrm{SRP}}(t)
+  =
+  \theta_{\argmax_a S(t,\theta_a)}.
+\end{equation}
+本文不是直接使用该峰值作为最终结果, 而是将 $S(t,\theta_a)$ 作为可学习输入特征。
+
+\subsection{IPD 空间特征}
+
+IPD 是 TDOA 在频域中的相位表现。对麦克风对 $(i,j)$,
+\begin{equation}
+  \phi_{ij}(t,f)=
+  \angle\left(X_i(t,f)X_j^*(t,f)\right).
+\end{equation}
+由于相位具有 $2\pi$ 周期性, 直接回归或输入 $\phi$ 会在边界处产生跳变。
+因此本文使用
+\begin{equation}
+  \mathbf{q}_{ij}(t,f)
+  =
+  \left[\cos\phi_{ij}(t,f),\ \sin\phi_{ij}(t,f)\right]
+\end{equation}
+作为连续 IPD 表示。
+
+\subsection{TCN 时序建模}
+
+深度学习方法已经广泛用于声源定位和 SELD 任务 \cite{adavanne2019seldnet,grumiaux2022survey}。
+本文选择 TCN 作为轻量时序建模主干, 主要因为当前任务使用固定历史窗口,
+不需要 Transformer 级别的长上下文建模, 也希望保持实时因果性。
+TCN 使用一维因果卷积处理帧级序列 \cite{bai2018tcn}。给定输入序列
+$\mathbf{h}_{0:T}$, 一个膨胀因果卷积块可抽象为
+\begin{equation}
+  \mathbf{z}_t
+  =
+  \sum_{k=0}^{K-1}
+  \mathbf{W}_k\mathbf{h}_{t-dk},
+\end{equation}
+其中 $K$ 为卷积核大小, $d$ 为 dilation。因果性保证当前输出只依赖当前和过去帧。
+本文使用门控激活:
+\begin{equation}
+  \operatorname{GatedConv}(\mathbf{h})_t
+  =
+  \mathbf{v}_t\odot \sigma(\mathbf{g}_t),
+\end{equation}
+并通过残差连接和 LayerNorm 得到
+\begin{equation}
+  \mathbf{h}'_t
+  =
+  \operatorname{LayerNorm}
+  \left(
+    \mathbf{h}_t + \operatorname{Dropout}(\mathbf{W}_o
+    (\mathbf{v}_t\odot\sigma(\mathbf{g}_t)))
+  \right).
+\end{equation}
+
+\section{方法}
+
+\subsection{问题定义}
+
+给定 $C=8$ 通道历史音频
+\begin{equation}
+  \mathbf{x}\in\mathbb{R}^{C\times N},
+\end{equation}
+其中 $N=T\cdot H$, $T$ 为历史帧数, $H$ 为 hop length。
+目标是估计当前帧 $T$ 的声源方位角 $\theta^\star\in[-\pi,\pi)$。
+本文将定位转化为离散方位 heatmap 预测。设方位角被划分为 $A$ 个 bin:
+\begin{equation}
+  \Theta=\{\theta_a\}_{a=1}^{A},\qquad A=72.
+\end{equation}
+模型输出当前帧 heatmap logits:
+\begin{equation}
+  \mathbf{o}\in\mathbb{R}^{A},
+\end{equation}
+最终预测方位为
+\begin{equation}
+  \hat{\theta}
+  =
+  \theta_{\argmax_a \sigma(o_a)}.
+\end{equation}
+
+\subsection{特征前端}
+
+对每个通道做 STFT:
+\begin{equation}
+  X_c(t,f)=\stft(x_c)[t,f],
+  \qquad c=1,\ldots,C.
+\end{equation}
+
+\paragraph{log-mel 特征}
+首先计算功率谱 $P_c(t,f)=|X_c(t,f)|^2$。参考麦克风 log-mel 为
+\begin{equation}
+  \mathbf{M}_{\mathrm{ref}}(t,m)
+  =
+  \log\left(
+    \sum_f P_1(t,f)B_{fm}+\epsilon
+  \right),
+\end{equation}
+其中 $B_{fm}$ 是 mel filterbank。多通道平均能量 log-mel 为
+\begin{equation}
+  \mathbf{M}_{\mathrm{rms}}(t,m)
+  =
+  \log\left(
+    \sum_f
+    \left(\frac{1}{C}\sum_{c=1}^{C}P_c(t,f)\right)
+    B_{fm}+\epsilon
+  \right).
+\end{equation}
+
+\paragraph{IPD 特征}
+对默认麦克风对集合 $\mathcal{P}$, 计算 $\cos\phi_{ij}$ 和 $\sin\phi_{ij}$,
+并堆叠为
+\begin{equation}
+  \mathbf{I}\in\mathbb{R}^{2|\mathcal{P}|\times T\times F_I}.
+\end{equation}
+当前 8 通道设置下使用相邻麦克风对和对径麦克风对, 共 $|\mathcal{P}|=12$,
+因此 IPD 通道数为 $24$。
+
+\paragraph{SRP-PHAT 空间谱}
+根据式 \eqref{eq:srp}, 对 $A=72$ 个候选方位计算 SRP-PHAT map:
+\begin{equation}
+  \mathbf{S}\in\mathbb{R}^{T\times A}.
+\end{equation}
+一个关键实现点是: SRP 的 azimuth 维不能在编码前被平均掉。
+若使用
+\begin{equation}
+  \operatorname{mean}_a\,\mathbf{S}(t,a),
+\end{equation}
+则峰值位置被抹去, 模型无法知道能量来自哪个方向。
+因此本文保留方位维并在卷积后展平:
+\begin{equation}
+  \mathbf{H}_{\mathrm{srp}}
+  =
+  W_{\mathrm{srp}}
+  \operatorname{vec}_{c,a}
+  \left(
+    \operatorname{CNN}_{\mathrm{srp}}(\mathbf{S})
+  \right).
+\end{equation}
+
+\subsection{三路编码与融合}
+
+三类输入分别送入编码器:
+\begin{align}
+  \mathbf{H}_{\mathrm{spec}}
+  &= E_{\mathrm{spec}}
+     \left([\mathbf{M}_{\mathrm{ref}},\mathbf{M}_{\mathrm{rms}}]\right),
+  \\
+  \mathbf{H}_{\mathrm{ipd}}
+  &= E_{\mathrm{ipd}}(\mathbf{I}),
+  \\
+  \mathbf{H}_{\mathrm{srp}}
+  &= E_{\mathrm{srp}}(\mathbf{S}).
+\end{align}
+三者输出均为帧级表示。加入 VAD ratio $v_t$ 后, 融合特征为
+\begin{equation}
+  \mathbf{h}^{(0)}_t
+  =
+  \operatorname{GELU}
+  \left(
+    \operatorname{LN}
+    \left(
+      W_f
+      [\mathbf{h}_{\mathrm{spec},t};
+       \mathbf{h}_{\mathrm{ipd},t};
+       \mathbf{h}_{\mathrm{srp},t};
+       v_t]
+    \right)
+  \right).
+\end{equation}
+随后通过 $L$ 层因果 TCN:
+\begin{equation}
+  \mathbf{h}^{(L)}_{1:T}
+  =
+  \operatorname{TCN}(\mathbf{h}^{(0)}_{1:T}).
+\end{equation}
+当前帧表示取历史窗口最后一帧:
+\begin{equation}
+  \mathbf{h}_{\mathrm{cur}}=\mathbf{h}^{(L)}_T.
+\end{equation}
+heatmap logits 由线性头输出:
+\begin{equation}
+  \mathbf{o}
+  =
+  W_h\operatorname{LN}(\mathbf{h}_{\mathrm{cur}})+\mathbf{b}_h.
+\end{equation}
+
+\subsection{标签构造与训练目标}
+
+对真实方位 $\theta^\star$ 构造平滑 heatmap 标签。第 $a$ 个方位 bin 的标签为
+\begin{equation}
+  y_a
+  =
+  \exp\left[
+    -\frac{1}{2}
+    \left(
+      \frac{
+        \wrap(\theta_a-\theta^\star)
+      }{
+        \Delta_\theta\sigma_b
+      }
+    \right)^2
+  \right],
+  \label{eq:heatmap_target}
+\end{equation}
+其中 $\Delta_\theta=2\pi/A$, $\sigma_b$ 为以 bin 为单位的高斯宽度。
+
+当前 localization-only 训练主要使用 heatmap BCE 和分布 KL:
+\begin{align}
+  \mathcal{L}_{\mathrm{BCE}}
+  &=
+  -\sum_{a=1}^{A}
+  \left[
+    \alpha y_a\log\sigma(o_a)
+    +(1-y_a)\log(1-\sigma(o_a))
+  \right],
+  \\
+  \tilde{y}_a
+  &=
+  \frac{y_a}{\sum_{b=1}^{A}y_b+\epsilon},
+  \\
+  p_a
+  &=
+  \frac{\exp(o_a)}{\sum_{b=1}^{A}\exp(o_b)},
+  \\
+  \mathcal{L}_{\mathrm{KL}}
+  &=
+  \sum_{a=1}^{A}
+  \tilde{y}_a
+  \log\frac{\tilde{y}_a}{p_a+\epsilon}.
+\end{align}
+总定位损失为
+\begin{equation}
+  \mathcal{L}_{\mathrm{loc}}
+  =
+  \lambda_{\mathrm{BCE}}\mathcal{L}_{\mathrm{BCE}}
+  +
+  \lambda_{\mathrm{KL}}\mathcal{L}_{\mathrm{KL}}.
+\end{equation}
+
+代码中仍保留 count、slot、future 和 motion heads。slot 状态定义为
+\begin{equation}
+  \mathbf{s}_{k,t}
+  =
+  [a_{k,t},\sin\theta_{k,t},\cos\theta_{k,t},\rho_{k,t},\omega_{k,t}],
+\end{equation}
+其中 $a$ 表示活动状态, $\rho$ 表示距离, $\omega$ 表示角速度。
+这些头在当前故事中作为扩展模块, 不作为主定位结论。
+
+\section{实验设置}
+
+\subsection{数据与通道设置}
+
+本文当前实验使用 RealMAN 的第二圈 8 通道子阵列:
+\begin{equation}
+  \mathcal{C}=\{9,10,11,12,13,14,15,16\}.
+\end{equation}
+该子阵列半径为 $0.06\,\mathrm{m}$, 与代码中的几何假设一致。
+输入采样率为 $16\,\mathrm{kHz}$, 历史帧数 $T=128$, hop length 为 160,
+即历史窗口约为 $1.28\,\mathrm{s}$。
+
+\subsection{评价指标}
+
+方位角误差必须按环形角度计算:
+\begin{equation}
+  e(\hat{\theta},\theta^\star)
+  =
+  \left|
+    \wrap(\hat{\theta}-\theta^\star)
+  \right|\cdot\frac{180}{\pi}.
+\end{equation}
+MAE 定义为
+\begin{equation}
+  \mathrm{MAE}
+  =
+  \frac{1}{N}
+  \sum_{n=1}^{N}
+  e(\hat{\theta}_n,\theta^\star_n).
+\end{equation}
+ACC@5 定义为
+\begin{equation}
+  \mathrm{ACC@5}
+  =
+  \frac{1}{N}
+  \sum_{n=1}^{N}
+  \mathbb{I}
+  \left[
+    e(\hat{\theta}_n,\theta^\star_n)
+    \le 5^\circ
+  \right].
+\end{equation}
+
+\subsection{基线与消融}
+
+本文建议保留三类对比:
+\begin{enumerate}
+  \item 传统基线: SRP-PHAT peak;
+  \item RealMAN 官方 baseline: CRNN 和 IPDnet;
+  \item 8ch ring2 消融: logmel only、logmel+IPD、logmel+SRP、logmel+IPD+SRP。
+\end{enumerate}
+四组消融回答的问题如表 \ref{tab:ablation_question}。
+
+\begin{table}[h]
+  \centering
+  \caption{8ch ring2 消融设计}
+  \label{tab:ablation_question}
+  \begin{tabular}{ll}
+    \toprule
+    配置 & 目的 \\
+    \midrule
+    logmel only & 测试仅凭语音内容和能量能否定位 \\
+    logmel + IPD & 测试相位差空间线索的贡献 \\
+    logmel + SRP & 测试显式空间谱的贡献 \\
+    logmel + IPD + SRP & 测试两类空间线索的互补性 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\section{初步结果}
+
+当前已验证主结果来自 RealMAN ring2\_8ch 的 localization-only 短跑训练。
+在 64 batch validation 子集上的结果如表 \ref{tab:current_result}。
+
+\begin{table}[h]
+  \centering
+  \caption{当前 RealMAN ring2\_8ch 定位结果}
+  \label{tab:current_result}
+  \begin{tabular}{lcc}
+    \toprule
+    分组 & MAE $\downarrow$ & ACC@5 $\uparrow$ \\
+    \midrule
+    all & $4.49^\circ$ & 82.25\% \\
+    static & $2.59^\circ$ & 87.74\% \\
+    moving & $6.84^\circ$ & 75.44\% \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+消融初步结果如表 \ref{tab:ablation_result}。当前短跑结果显示,
+完整的 logmel+IPD+SRP 组合明显优于单独特征分支, 也验证了 SRP 方位维保留的重要性。
+
+\begin{table}[h]
+  \centering
+  \caption{8ch ring2 初步消融结果}
+  \label{tab:ablation_result}
+  \begin{tabular}{lcc}
+    \toprule
+    配置 & MAE $\downarrow$ & ACC@5 $\uparrow$ \\
+    \midrule
+    SRP-PHAT peak & $164.04^\circ$ & 1.19\% \\
+    logmel only & $83.74^\circ$ & 12.01\% \\
+    logmel + IPD & $56.78^\circ$ & 1.31\% \\
+    logmel + SRP & $88.98^\circ$ & 3.13\% \\
+    logmel + IPD + SRP & $4.49^\circ$ & 82.25\% \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\section{讨论}
+
+当前结果支持三个结论。
+第一, 传统 SRP-PHAT peak 可以作为可解释基线, 但在当前数据对齐和短窗设置下表现较差,
+不能直接满足真实定位需求。
+第二, 单独的 logmel、IPD 或 SRP 分支都不足以稳定定位; 完整模型的提升来自
+频谱内容、相位差和空间谱之间的互补融合。
+第三, SRP 空间谱必须保留 azimuth bin 位置。若在编码阶段过早平均方位维,
+模型会失去最关键的方向信息。
+
+当前仍有三点风险需要在正式论文中谨慎表述:
+\begin{enumerate}
+  \item 当前实验使用的是 CH9--CH16 ring2\_8ch 子阵列, 与 RealMAN 官方默认定位
+  baseline 通道设置并不完全一致, 因此不能写成严格复现官方 CRNN/IPDnet。
+  \item 当前训练是短跑调试结果, 后续全量数据和更长训练仍需补齐。
+  \item moving 子集弱于 static, 需要进一步检查标签时间对齐和窗口采样策略。
+\end{enumerate}
+
+\section{结论}
+
+本文初稿提出了一条适合当前工程状态的论文主线:
+在 RealMAN 真实多通道数据上, 不抛弃传统声学先验, 而是将 log-mel、IPD 和
+SRP-PHAT 空间谱作为可解释输入, 再通过 CNN 编码器和因果 TCN 学习短时序融合,
+最终输出当前方位 heatmap。该路线既能和 SRP-PHAT 传统基线对话,
+也能和 RealMAN 官方 CRNN/IPDnet 的 MAE、ACC@5 指标体系对齐。
+
+\bibliographystyle{IEEEtran}
+\bibliography{refs}
+
+\end{document}

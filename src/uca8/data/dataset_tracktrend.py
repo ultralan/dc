@@ -1,5 +1,13 @@
 from __future__ import annotations
 
+"""通用 LOCATA-like 跟踪数据集和随机合成数据集.
+
+这个文件是早期/通用数据接口, 用于读取类似 LOCATA 包结构的数据:
+音频、阵列位置、声源位置、VAD 和 required_time 一起构成连续轨迹.
+它和 RealMAN 专用数据集共用 ``TrackTrendLabelBuilder``,
+所以模型看到的训练字典格式保持一致.
+"""
+
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -14,6 +22,11 @@ from uca8.utils.audio_io import load_audio_file
 
 @dataclass(slots=True)
 class PackageRecord:
+    """一个录音包的缓存信息.
+
+    ``targets`` 已经由 ``TrackTrendLabelBuilder`` 预构造, 避免每个窗口重复算标签.
+    """
+
     package_dir: Path
     array_name: str
     audio_path: Path
@@ -24,21 +37,26 @@ class PackageRecord:
 
 @dataclass(slots=True)
 class WindowRecord:
+    """一个滑动窗口索引, 指向某个 package 的起始帧."""
+
     package_index: int
     start_frame: int
 
 
 def _read_tsv(path: Path) -> np.ndarray:
+    """读取带表头的 TSV 文件."""
     return np.atleast_1d(
         np.genfromtxt(path, delimiter="\t", names=True, dtype=None, encoding="utf-8")
     )
 
 
 def _seconds_column(table: np.ndarray) -> torch.Tensor:
+    """提取 second 时间戳列."""
     return torch.as_tensor(np.asarray(table["second"], dtype=np.float32))
 
 
 def _xyz_columns(table: np.ndarray, prefix: str = "") -> torch.Tensor:
+    """从结构化表中提取 x/y/z 三列."""
     return torch.stack(
         (
             torch.as_tensor(np.asarray(table[f"{prefix}x"], dtype=np.float32)),
@@ -50,12 +68,14 @@ def _xyz_columns(table: np.ndarray, prefix: str = "") -> torch.Tensor:
 
 
 def _count_mics(table: np.ndarray) -> int:
+    """根据 mic*_x 列数量推断麦克风数."""
     names = table.dtype.names or ()
     mic_x = [name for name in names if name.startswith("mic") and name.endswith("_x")]
     return len(mic_x)
 
 
 def _read_vad_series(path: Path, target_length: int) -> torch.Tensor:
+    """读取 VAD 序列并重采样/索引到目标帧数."""
     values = np.loadtxt(path, skiprows=1, dtype=np.float32)
     values = np.atleast_1d(values)
     if values.shape[0] == target_length:
@@ -67,6 +87,12 @@ def _read_vad_series(path: Path, target_length: int) -> torch.Tensor:
 
 
 class LocataLikeTrackTrendDataset(Dataset[dict[str, Any]]):
+    """读取 LOCATA-like 包结构并按滑动窗口生成样本.
+
+    输出字段与 RealMAN 数据集保持一致, 这样训练脚本不需要关心数据来源.
+    每个窗口包含历史音频输入、当前帧标签和未来帧标签.
+    """
+
     def __init__(
         self,
         *,
@@ -81,6 +107,10 @@ class LocataLikeTrackTrendDataset(Dataset[dict[str, Any]]):
         num_heatmap_bins: int = 72,
         audio_cache_dir: str | Path | None = None,
     ) -> None:
+        """初始化 LOCATA-like 数据集.
+
+        扫描 root_dir 下的录音包, 预构造所有帧级标签, 再按滑动窗口建立索引.
+        """
         self.root_dir = Path(root_dir)
         self.history_frames = history_frames
         self.future_frames = future_frames
@@ -99,9 +129,11 @@ class LocataLikeTrackTrendDataset(Dataset[dict[str, Any]]):
         self.windows = self._build_windows()
 
     def __len__(self) -> int:
+        """返回可用滑动窗口数量."""
         return len(self.windows)
 
     def __getitem__(self, index: int) -> dict[str, Any]:
+        """读取一个滑动窗口样本."""
         window = self.windows[index]
         package = self.packages[window.package_index]
         current_idx = window.start_frame + self.history_frames - 1
@@ -124,6 +156,7 @@ class LocataLikeTrackTrendDataset(Dataset[dict[str, Any]]):
         }
 
     def _load_packages(self) -> list[PackageRecord]:
+        """扫描 root_dir 下所有合法录音包并预构造标签."""
         packages: list[PackageRecord] = []
         for package_dir in sorted(self.root_dir.glob("task*/recording*/*")):
             if not package_dir.is_dir():
@@ -155,6 +188,8 @@ class LocataLikeTrackTrendDataset(Dataset[dict[str, Any]]):
                 limit = min(frame_count, len(source_table))
                 source_positions[:limit, slot_idx] = _xyz_columns(source_table)[:limit]
                 source_activity[:limit, slot_idx] = _read_vad_series(vad_path, limit)
+
+            # required_time 的 valid_flag 会屏蔽无效时间段.
             source_activity = source_activity * valid[:frame_count].unsqueeze(-1)
             targets = self.label_builder.build_sequence_targets(
                 source_positions=source_positions,
@@ -181,6 +216,7 @@ class LocataLikeTrackTrendDataset(Dataset[dict[str, Any]]):
         return packages
 
     def _build_windows(self) -> list[WindowRecord]:
+        """按 ``window_stride_frames`` 枚举历史+未来完整窗口."""
         windows: list[WindowRecord] = []
         usable = self.history_frames + self.future_frames
         for package_index, package in enumerate(self.packages):
@@ -196,6 +232,7 @@ class LocataLikeTrackTrendDataset(Dataset[dict[str, Any]]):
         start_frame: int,
         stop_frame: int,
     ) -> torch.Tensor:
+        """按窗口时间戳切出模型需要的多通道音频片段."""
         waveform, sample_rate = load_audio_file(
             package.audio_path,
             target_sample_rate=self.model_sample_rate,
@@ -218,6 +255,12 @@ class LocataLikeTrackTrendDataset(Dataset[dict[str, Any]]):
 
 
 class SyntheticTrackTrendDataset(Dataset[dict[str, torch.Tensor]]):
+    """用于测试训练管线的随机合成数据集.
+
+    该数据集不模拟真实声学, 只保证张量形状和字段完整.
+    适合单元测试、CPU smoke test, 不适合作为实验结果.
+    """
+
     def __init__(
         self,
         *,
@@ -230,6 +273,7 @@ class SyntheticTrackTrendDataset(Dataset[dict[str, torch.Tensor]]):
         max_sources: int,
         heatmap_bins: int,
     ) -> None:
+        """初始化随机合成数据集的形状参数."""
         self.size = size
         self.num_channels = num_channels
         self.history_frames = history_frames
@@ -241,9 +285,11 @@ class SyntheticTrackTrendDataset(Dataset[dict[str, torch.Tensor]]):
         self.waveform_samples = history_frames * hop_length
 
     def __len__(self) -> int:
+        """返回合成样本数."""
         return self.size
 
     def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
+        """根据 index 固定随机种子生成一个可复现样本."""
         generator = torch.Generator().manual_seed(index)
         waveform = torch.randn(self.num_channels, self.waveform_samples, generator=generator)
         vad_history = torch.rand(self.history_frames, 1, generator=generator)

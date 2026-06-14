@@ -1,4 +1,8 @@
-"""Geometry utilities for circular arrays."""
+"""圆阵几何工具入口.
+
+这里导出阵列坐标、麦克风对、方位角网格、角度 wrap、远场延迟等函数.
+这些工具被特征提取、标签构造和仿真模块共同使用.
+"""
 
 from .uca8 import (
     angular_velocity,

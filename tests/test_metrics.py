@@ -5,9 +5,16 @@ import unittest
 import torch
 
 from uca8.metrics import (
+    circular_abs_error_deg,
     future_slot_delta_error_stats_deg,
+    heatmap_localization_stats,
+    heatmap_logits_to_azimuth_deg,
     heatmap_peak_recall_stats,
+    localization_acc5,
+    localization_mae_deg,
+    localization_stats_from_angles,
     primary_slot_range_stats,
+    slot_primary_localization_stats,
     slot_activity_confusion_stats,
     slot_angle_error_stats_deg,
     slot_count_accuracy_stats,
@@ -122,6 +129,56 @@ class SlotMetricTests(unittest.TestCase):
 
         self.assertEqual(float(total.item()), 2.0)
         self.assertAlmostEqual(float(recall_sum.item()) / float(total.item()), 1.0, places=4)
+
+    def test_realman_ssl_circular_error_wraps_at_180(self) -> None:
+        pred = torch.tensor([179.0, -179.0, 10.0])
+        target = torch.tensor([-179.0, 179.0, -5.0])
+
+        error = circular_abs_error_deg(pred, target)
+
+        self.assertTrue(torch.allclose(error, torch.tensor([2.0, 2.0, 15.0]), atol=1e-4))
+
+    def test_realman_ssl_acc5_includes_exact_threshold(self) -> None:
+        pred = torch.tensor([0.0, 10.0, 20.0])
+        target = torch.tensor([0.0, 15.0, 30.0])
+
+        stats = localization_stats_from_angles(pred, target)
+
+        self.assertAlmostEqual(localization_mae_deg(stats), 5.0, places=4)
+        self.assertAlmostEqual(localization_acc5(stats), 2.0 / 3.0, places=4)
+
+    def test_heatmap_logits_to_azimuth_uses_realman_bins(self) -> None:
+        logits = torch.full((1, 72), -10.0)
+        logits[0, 36] = 10.0
+
+        angle = heatmap_logits_to_azimuth_deg(logits)
+
+        self.assertAlmostEqual(float(angle.item()), 0.0, places=4)
+
+    def test_heatmap_localization_stats_matches_target_slot_angle(self) -> None:
+        logits = torch.full((1, 72), -10.0)
+        logits[0, 36] = 10.0
+        target = torch.zeros(1, 2, 5)
+        target[0, 0, 0] = 1.0
+        target[0, 0, 1] = 0.0
+        target[0, 0, 2] = 1.0
+
+        stats = heatmap_localization_stats(logits, target)
+
+        self.assertAlmostEqual(localization_mae_deg(stats), 0.0, places=4)
+        self.assertAlmostEqual(localization_acc5(stats), 1.0, places=4)
+
+    def test_slot_primary_localization_penalizes_missing_prediction(self) -> None:
+        pred = torch.zeros(1, 2, 5)
+        target = torch.zeros(1, 2, 5)
+        target[0, 0, 0] = 1.0
+        target[0, 0, 1] = 0.0
+        target[0, 0, 2] = 1.0
+
+        stats = slot_primary_localization_stats(pred, target)
+
+        self.assertAlmostEqual(localization_mae_deg(stats), 180.0, places=4)
+        self.assertAlmostEqual(localization_acc5(stats), 0.0, places=4)
 
 
 if __name__ == "__main__":

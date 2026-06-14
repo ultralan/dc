@@ -1,0 +1,9 @@
+defaults:
+  - uca8_realman_ring2
+  - _self_
+
+use_logmel_ref: true
+use_logmel_rms: true
+use_ipd: true
+use_srp: true
+use_vad: true

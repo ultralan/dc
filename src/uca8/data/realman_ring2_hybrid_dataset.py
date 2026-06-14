@@ -1,5 +1,12 @@
 from __future__ import annotations
 
+"""RealMAN + 解析合成 curriculum 的混合数据集.
+
+RealMAN 主数据集中以单声源为主, 对多声源、进入/离开、反向运动等扩展任务覆盖不足.
+本文件在真实 RealMAN 样本之外, 使用真实 dp_speech 作为源音频, 再用远场阵列模型
+渲染可控的多声源场景. 这样既保留真实语音内容, 又能补足跟踪扩展所需的标签形态.
+"""
+
 import math
 from pathlib import Path
 from typing import Any
@@ -15,18 +22,22 @@ from uca8.utils.audio_io import load_audio_file
 
 
 def _uniform(generator: torch.Generator, low: float, high: float) -> float:
+    """用指定 generator 采样均匀分布浮点数, 保证样本可复现."""
     return float(low + (high - low) * torch.rand(1, generator=generator).item())
 
 
 def _randint(generator: torch.Generator, low: int, high: int) -> int:
+    """用指定 generator 采样整数, 区间为 ``[low, high)``."""
     return int(torch.randint(low, high, (1,), generator=generator).item())
 
 
 def _choice_sign(generator: torch.Generator) -> float:
+    """随机返回 -1 或 1, 用于决定运动方向."""
     return -1.0 if bool(torch.randint(0, 2, (1,), generator=generator).item()) else 1.0
 
 
 def _linspace_rad(start_deg: float, stop_deg: float, steps: int) -> torch.Tensor:
+    """按角度端点生成弧度序列."""
     if steps <= 0:
         return torch.zeros(0, dtype=torch.float32)
     if steps == 1:
@@ -35,7 +46,12 @@ def _linspace_rad(start_deg: float, stop_deg: float, steps: int) -> torch.Tensor
 
 
 class RealMANRing2HybridDataset(Dataset[dict[str, Any]]):
-    """Mix real single-source RealMAN windows with analytic multi-source curriculum windows."""
+    """混合真实 RealMAN 样本和解析合成 curriculum 样本.
+
+    前 ``len(real_dataset)`` 个 index 直接返回真实 RealMAN 样本;
+    后续 index 返回合成 curriculum 样本. 合成样本仍使用真实 dp_speech 作为源,
+    只是方位轨迹和多声源活动由本类生成.
+    """
 
     def __init__(
         self,
@@ -67,6 +83,11 @@ class RealMANRing2HybridDataset(Dataset[dict[str, Any]]):
         curriculum_rollout_steps: int = 1,
         curriculum_mode_weights: dict[str, float] | None = None,
     ) -> None:
+        """初始化混合数据集.
+
+        前半部分复用 ``RealMANRing2Dataset`` 的真实样本;
+        curriculum 部分根据模式权重动态合成, 不预生成到磁盘.
+        """
         self.real_dataset = RealMANRing2Dataset(
             root_dir=root_dir,
             moving_csv=moving_csv,
@@ -148,14 +169,17 @@ class RealMANRing2HybridDataset(Dataset[dict[str, Any]]):
             raise FileNotFoundError("Hybrid dataset requires at least one RealMAN record.")
 
     def __len__(self) -> int:
+        """返回真实样本数 + curriculum 样本数."""
         return len(self.real_dataset) + self.curriculum_size
 
     def __getitem__(self, index: int) -> dict[str, Any]:
+        """按 index 选择真实样本或 curriculum 样本."""
         if index < len(self.real_dataset):
             return self.real_dataset[index]
         return self._build_curriculum_sample(index - len(self.real_dataset))
 
     def summary(self) -> dict[str, Any]:
+        """返回混合数据集概览, 包括 curriculum 模式权重."""
         real_summary = self.real_dataset.summary()
         return {
             "dataset_kind": "realman_ring2_hybrid",
@@ -179,6 +203,15 @@ class RealMANRing2HybridDataset(Dataset[dict[str, Any]]):
         }
 
     def _build_curriculum_sample(self, index: int) -> dict[str, Any]:
+        """构造一个解析合成训练样本.
+
+        流程:
+        1. 按权重选择场景模式;
+        2. 采样声源轨迹和活动状态;
+        3. 从 RealMAN dp_speech 中裁真实源音频;
+        4. 用远场模型渲染 8 通道阵列观测;
+        5. 构造和真实数据一致的标签字典.
+        """
         generator = torch.Generator().manual_seed(self.curriculum_seed + index)
         mode_index = int(
             torch.multinomial(
@@ -193,6 +226,8 @@ class RealMANRing2HybridDataset(Dataset[dict[str, Any]]):
             generator=generator,
         )
         source_count = int((source_activity.sum(dim=0) > 0.0).sum().item())
+
+        # 使用真实 dp_speech 作为源内容, 只合成空间传播和轨迹.
         mono_waveforms = [
             self._sample_source_audio(
                 generator,
@@ -248,6 +283,7 @@ class RealMANRing2HybridDataset(Dataset[dict[str, Any]]):
         *,
         required_samples: int,
     ) -> torch.Tensor:
+        """从真实 RealMAN dp_speech 中随机裁一段单声道源音频."""
         record = self.curriculum_records[_randint(generator, 0, len(self.curriculum_records))]
         waveform, _ = load_audio_file(
             record.dp_path,
@@ -270,6 +306,12 @@ class RealMANRing2HybridDataset(Dataset[dict[str, Any]]):
         mode: str,
         generator: torch.Generator,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        """采样一个 curriculum 场景的声源轨迹和活动矩阵.
+
+        返回:
+            ``source_positions``: ``[T, max_sources, 3]``.
+            ``source_activity``: ``[T, max_sources]``.
+        """
         source_positions = torch.zeros(
             self.curriculum_scene_frames,
             self.max_sources,
@@ -297,6 +339,7 @@ class RealMANRing2HybridDataset(Dataset[dict[str, Any]]):
             )
             secondary_activity = torch.ones(self.curriculum_scene_frames, dtype=torch.float32)
             if mode == "dual_enter":
+                # 第二个声源在未来窗口中进入.
                 secondary_activity = torch.zeros(self.curriculum_scene_frames, dtype=torch.float32)
                 enter_after = self.history_frames + _randint(
                     generator,
@@ -305,6 +348,7 @@ class RealMANRing2HybridDataset(Dataset[dict[str, Any]]):
                 )
                 secondary_activity[enter_after:] = 1.0
             if mode == "dual_leave":
+                # 第二个声源在未来窗口中离开.
                 leave_after = self.history_frames + _randint(
                     generator,
                     max(2, self.future_frames // 4),
@@ -322,6 +366,10 @@ class RealMANRing2HybridDataset(Dataset[dict[str, Any]]):
         return source_positions, source_activity
 
     def _sample_track(self, generator: torch.Generator, *, reverse: bool) -> torch.Tensor:
+        """采样主声源轨迹.
+
+        ``reverse=True`` 时, 历史段到边界后在未来段反向运动, 用于测试趋势预测.
+        """
         boundary_deg = _uniform(generator, -120.0, 120.0)
         direction = _choice_sign(generator)
         hist_span = _uniform(generator, 18.0, 70.0)
@@ -346,6 +394,7 @@ class RealMANRing2HybridDataset(Dataset[dict[str, Any]]):
         primary_theta: torch.Tensor,
         generator: torch.Generator,
     ) -> torch.Tensor:
+        """基于主声源边界位置采样第二个声源轨迹."""
         primary_boundary_deg = float(torch.rad2deg(primary_theta[self.history_frames - 1]).item())
         separation = _uniform(generator, 55.0, 120.0) * _choice_sign(generator)
         secondary_boundary_deg = primary_boundary_deg + separation
@@ -375,6 +424,7 @@ class RealMANRing2HybridDataset(Dataset[dict[str, Any]]):
         distance_m: float,
         active: torch.Tensor,
     ) -> None:
+        """把极坐标轨迹写入 source_positions/source_activity 的指定 slot."""
         source_positions[:, slot_idx, 0] = distance_m * torch.cos(theta)
         source_positions[:, slot_idx, 1] = distance_m * torch.sin(theta)
         source_activity[:, slot_idx] = active.to(dtype=torch.float32)
