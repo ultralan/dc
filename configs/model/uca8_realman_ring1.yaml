@@ -1,0 +1,22 @@
+name: uca8_realman_ring1
+# RealMAN ring1 + 中心麦 9 通道子阵列 (对齐官方 CRNN baseline 的 use_mic_id=[1,2,3,4,5,6,7,8,0]).
+# ring1: CH1-CH8 (半径 0.03m 圆周 8 麦) + CH0 (中心麦, 原点).
+num_input_channels: 9
+include_center_mic: true
+array_radius_m: 0.03
+sound_speed: 343.0
+max_sources: 4
+num_count_classes: 5
+future_frames: 32
+history_frames: 128
+heatmap_bins: 72
+spec_hidden_dim: 128
+spatial_hidden_dim: 64
+model_dim: 256
+tcn_kernel_size: 3
+tcn_dilations: [1, 2, 4, 8, 16, 32]
+dropout: 0.1
+slot_decoder_attention_heads: 4
+future_decoder_layers: 2
+future_decoder_dropout: 0.1
+use_slot_context_in_future_decoder: true

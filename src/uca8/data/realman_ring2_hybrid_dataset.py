@@ -76,6 +76,8 @@ class RealMANRing2HybridDataset(Dataset[dict[str, Any]]):
         use_manifest_cache: bool = True,
         manifest_path: str | Path | None = None,
         audio_cache_dir: str | Path | None = None,
+        feature_cache_dir: str | Path | None = None,
+        sample_cache_dir: str | Path | None = None,
         max_items: int | None = None,
         curriculum_ratio: float = 1.0,
         curriculum_size: int | None = None,
@@ -105,6 +107,8 @@ class RealMANRing2HybridDataset(Dataset[dict[str, Any]]):
             use_manifest_cache=use_manifest_cache,
             manifest_path=manifest_path,
             audio_cache_dir=audio_cache_dir,
+            feature_cache_dir=feature_cache_dir,
+            sample_cache_dir=sample_cache_dir,
             max_items=max_items,
         )
         self.model_sample_rate = model_sample_rate
@@ -119,6 +123,9 @@ class RealMANRing2HybridDataset(Dataset[dict[str, Any]]):
         self.array_radius_m = array_radius_m
         self.sound_speed = sound_speed
         self.audio_cache_dir = Path(audio_cache_dir) if audio_cache_dir is not None else None
+        self.feature_cache_dir = (
+            Path(feature_cache_dir) if feature_cache_dir is not None else None
+        )
         self.curriculum_seed = int(curriculum_seed)
         default_curriculum_size = max(
             1,

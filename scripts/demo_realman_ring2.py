@@ -87,6 +87,7 @@ def main() -> None:
         moving_csv=args.moving_csv,
         static_csv=args.static_csv,
         audio_cache_dir=args.audio_cache_dir,
+        feature_cache_dir=args.audio_cache_dir.parent / "features_ring2_8ch",
         max_items=args.max_items,
     )
     dataloader = DataLoader(
@@ -112,7 +113,7 @@ def main() -> None:
     for step, batch in zip(range(1, args.steps + 1), cycle(dataloader), strict=False):
         batch = move_batch_to_device(batch, device)
         optimizer.zero_grad(set_to_none=True)
-        predictions = model(batch["waveform"], batch["vad_history"])
+        predictions = model(batch["waveform"], batch["vad_history"], sample_id=batch["sample_id"])
         losses = criterion(predictions, batch)
         losses["loss"].backward()
         optimizer.step()

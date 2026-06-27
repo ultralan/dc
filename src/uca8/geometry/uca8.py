@@ -18,20 +18,57 @@ def make_uniform_circular_array(
     radius: float = 0.045,
     z: float = 0.0,
     *,
+    include_center: bool = False,
     device: torch.device | None = None,
     dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
-    """构造二维均匀圆阵坐标.
+    """构造二维均匀圆阵坐标, 可选附加中心麦克风.
 
     mic0 放在 x 轴正方向, 其余麦克风按逆时针均匀分布.
-    返回形状为 ``[num_mics, 3]`` 的坐标张量, 单位与 ``radius`` 一致.
+    若 ``include_center=True``, 在末尾追加一个位于原点 ``[0, 0, z]`` 的中心麦克风,
+    其索引为 ``num_mics`` (与 RealMAN 官方 use_mic_id=[1..8,0] 中中心麦放最后的顺序一致).
+    返回形状为 ``[num_mics (+1), 3]`` 的坐标张量, 单位与 ``radius`` 一致.
     """
     indices = torch.arange(num_mics, device=device, dtype=dtype)
     angles = 2.0 * math.pi * indices / float(num_mics)
     x = radius * torch.cos(angles)
     y = radius * torch.sin(angles)
     z_axis = torch.full_like(x, z)
-    return torch.stack((x, y, z_axis), dim=-1)
+    coords = torch.stack((x, y, z_axis), dim=-1)
+    if include_center:
+        center = torch.tensor([[0.0, 0.0, z]], device=device, dtype=dtype)
+        coords = torch.cat([coords, center], dim=0)
+    return coords
+
+
+def infer_mic_pairs(mic_positions: torch.Tensor) -> list[tuple[int, int]]:
+    """根据麦克风坐标自动推断麦克风对.
+
+    自动检测是否存在位于原点的中心麦克风 (坐标范数接近 0):
+    - 无中心麦: 纯均匀圆阵, 调用 ``default_mic_pairs`` (相邻 + 对径).
+    - 有中心麦: 圆周相邻 8 对 + 圆周对径 4 对 + 中心与每个圆周麦 8 对, 共 20 对.
+      中心麦索引默认为最后一个 (与 ``include_center=True`` 的摆放一致).
+    """
+    num_total = int(mic_positions.shape[0])
+    # 检测中心麦: 坐标 xy 范数接近 0 的麦克风
+    xy = mic_positions[:, :2].float()
+    norms = torch.linalg.norm(xy, dim=-1)
+    center_mask = norms < (norms.max().item() * 1e-3 + 1e-6)
+    if not bool(center_mask.any()):
+        return default_mic_pairs(num_total)
+    center_idx = int(torch.nonzero(center_mask, as_tuple=False).flatten()[0].item())
+    # 圆周麦 = 除中心外的所有麦; 假设圆周麦索引连续且中心在末尾
+    ring_indices = [i for i in range(num_total) if i != center_idx]
+    pairs: list[tuple[int, int]] = []
+    num_ring = len(ring_indices)
+    # 圆周相邻对 + 对径对 (复用 default_mic_pairs 的逻辑, 再映射到实际索引)
+    ring_only = default_mic_pairs(num_ring)
+    for i, j in ring_only:
+        pairs.append((ring_indices[i], ring_indices[j]))
+    # 中心麦与每个圆周麦配对
+    for ri in ring_indices:
+        pairs.append((center_idx, ri))
+    return pairs
 
 
 def default_mic_pairs(num_mics: int = 8) -> list[tuple[int, int]]:

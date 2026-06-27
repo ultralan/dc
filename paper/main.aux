@@ -1,0 +1,66 @@
+\relax 
+\providecommand\hyper@newdestlabel[2]{}
+\providecommand*\HyPL@Entry[1]{}
+\HyPL@Entry{0<</S/D>>}
+\citation{knapp1976gcc}
+\citation{adavanne2019seldnet}
+\citation{grumiaux2022survey}
+\citation{yang2024realman}
+\citation{wang2024ipdnet}
+\@writefile{toc}{\contentsline {section}{\numberline {1}引言}{2}{section.1}\protected@file@percent }
+\citation{adavanne2019seldnet}
+\citation{wang2024ipdnet}
+\citation{bai2018tcn}
+\@writefile{toc}{\contentsline {section}{\numberline {2}相关工作}{3}{section.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.1}TDOA 与 SRP-PHAT}{3}{subsection.2.1}\protected@file@percent }
+\newlabel{eq:srp}{{2}{3}{TDOA 与 SRP-PHAT}{equation.2.2}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.2}IPD 与 SELD 深度方法}{3}{subsection.2.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.3}时序建模}{3}{subsection.2.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.4}声源跟踪与未来预测的空白}{3}{subsection.2.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {3}方法}{4}{section.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.1}问题定义}{4}{subsection.3.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.2}空间先验前端}{4}{subsection.3.2}\protected@file@percent }
+\@writefile{lof}{\contentsline {figure}{\numberline {1}{\ignorespaces 9 通道圆阵 (圆周 8 麦加中心麦) 几何与麦克风对配置。相邻麦对捕捉局部相位差, 对径麦对提供大孔径方向分辨, 中心-圆周麦对编码直达路径方位信息。}}{4}{figure.1}\protected@file@percent }
+\newlabel{fig:array}{{1}{4}{9 通道圆阵 (圆周 8 麦加中心麦) 几何与麦克风对配置。相邻麦对捕捉局部相位差, 对径麦对提供大孔径方向分辨, 中心-圆周麦对编码直达路径方位信息。}{figure.1}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.3}三路编码与因果 TCN}{5}{subsection.3.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.4}多任务输出头}{5}{subsection.3.4}\protected@file@percent }
+\@writefile{lof}{\contentsline {figure}{\numberline {2}{\ignorespaces TrackTrend 网络整体架构。空间先验前端 (log-mel/IPD/SRP-PHAT + VAD) 经三路编码与融合, 由因果 TCN 统一建模时序, 同时输出当前帧状态与未来 $K$ 帧状态。}}{6}{figure.2}\protected@file@percent }
+\newlabel{fig:arch}{{2}{6}{TrackTrend 网络整体架构。空间先验前端 (log-mel/IPD/SRP-PHAT + VAD) 经三路编码与融合, 由因果 TCN 统一建模时序, 同时输出当前帧状态与未来 $K$ 帧状态。}{figure.2}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.5}标签与训练目标}{6}{subsection.3.5}\protected@file@percent }
+\citation{yang2024realman}
+\citation{wang2024ipdnet}
+\@writefile{toc}{\contentsline {section}{\numberline {4}实验设置}{7}{section.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.1}数据与协议}{7}{subsection.4.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.2}模型与训练配置}{7}{subsection.4.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.3}未来预测的三方法对比}{7}{subsection.4.3}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {1}{\ignorespaces 模型与训练配置}}{8}{table.1}\protected@file@percent }
+\newlabel{tab:config}{{1}{8}{模型与训练配置}{table.1}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.4}评价指标}{8}{subsection.4.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {5}结果}{8}{section.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.1}当前帧定位}{8}{subsection.5.1}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {2}{\ignorespaces 当前帧定位 (RealMAN ring1+中心9麦, official val)}}{9}{table.2}\protected@file@percent }
+\newlabel{tab:current}{{2}{9}{当前帧定位 (RealMAN ring1+中心9麦, official val)}{table.2}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.2}空间先验前端的特征消融}{9}{subsection.5.2}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {3}{\ignorespaces 空间先验前端特征消融 (official val, 当前帧定位)}}{9}{table.3}\protected@file@percent }
+\newlabel{tab:ablation}{{3}{9}{空间先验前端特征消融 (official val, 当前帧定位)}{table.3}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.3}未来方位预测: 三方法对比}{10}{subsection.5.3}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {4}{\ignorespaces 未来 $K{=}32$ 帧方位预测三方法对比 (RealMAN ring1+中心9麦, official val, 137713 有效未来帧)}}{10}{table.4}\protected@file@percent }
+\newlabel{tab:future}{{4}{10}{未来 $K{=}32$ 帧方位预测三方法对比 (RealMAN ring1+中心9麦, official val, 137713 有效未来帧)}{table.4}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.4}按未来步数衰减与分组}{10}{subsection.5.4}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {5}{\ignorespaces 按未来步数 $k$ 的 MAE ($^\circ $, 无漏检惩罚, all 组)}}{10}{table.5}\protected@file@percent }
+\newlabel{tab:k_mae}{{5}{10}{按未来步数 $k$ 的 MAE ($^\circ $, 无漏检惩罚, all 组)}{table.5}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {6}讨论}{10}{section.6}\protected@file@percent }
+\@writefile{lof}{\contentsline {figure}{\numberline {3}{\ignorespaces (a) 训练损失收敛曲线 (loc\_strong 配置, $8$ 个 epoch, 细线为逐步损失, 粗线为滑动平均); (b) 未来方位预测 MAE 随预测步数 $k$ 的衰减, 外推基线误差随 $k$ 线性增长, 端到端模型在长时程上保持较低误差。}}{11}{figure.3}\protected@file@percent }
+\newlabel{fig:train_kmae}{{3}{11}{(a) 训练损失收敛曲线 (loc\_strong 配置, $8$ 个 epoch, 细线为逐步损失, 粗线为滑动平均); (b) 未来方位预测 MAE 随预测步数 $k$ 的衰减, 外推基线误差随 $k$ 线性增长, 端到端模型在长时程上保持较低误差。}{figure.3}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {4}{\ignorespaces 两个移动声源样本的未来 $K{=}32$ 帧方位预测与真值对比 (ring1+中心9麦, official val)。 黑实线为真值, 蓝圆点为本文模型预测, 绿方点为线性外推。模型预测紧贴真值轨迹, 而线性外推在声源转弯处偏离。}}{11}{figure.4}\protected@file@percent }
+\newlabel{fig:pred_curve}{{4}{11}{两个移动声源样本的未来 $K{=}32$ 帧方位预测与真值对比 (ring1+中心9麦, official val)。 黑实线为真值, 蓝圆点为本文模型预测, 绿方点为线性外推。模型预测紧贴真值轨迹, 而线性外推在声源转弯处偏离。}{figure.4}{}}
+\bibstyle{IEEEtran}
+\bibdata{refs}
+\bibcite{knapp1976gcc}{1}
+\bibcite{adavanne2019seldnet}{2}
+\bibcite{grumiaux2022survey}{3}
+\bibcite{yang2024realman}{4}
+\@writefile{toc}{\contentsline {section}{\numberline {7}结论}{12}{section.7}\protected@file@percent }
+\bibcite{wang2024ipdnet}{5}
+\bibcite{bai2018tcn}{6}
+\gdef \@abspage@last{13}

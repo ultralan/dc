@@ -141,11 +141,14 @@ def build_dataset(
             max_sources=cfg.model.max_sources,
             num_heatmap_bins=cfg.model.heatmap_bins,
             split=split_override or str(cfg.data.get("split", "all")),
+            split_mode=str(cfg.data.get("split_mode", "hash")),
             val_ratio=float(cfg.data.get("val_ratio", 0.15)),
             split_seed=int(cfg.data.get("split_seed", cfg.seed)),
             use_manifest_cache=bool(cfg.data.get("use_manifest_cache", True)),
             manifest_path=cfg.data.get("manifest_path"),
             audio_cache_dir=cfg.data.get("audio_cache_dir"),
+            feature_cache_dir=cfg.data.get("feature_cache_dir"),
+            sample_cache_dir=cfg.data.get("sample_cache_dir"),
             max_items=cfg.data.get("max_items"),
         )
     if cfg.data.dataset_kind == "realman_ring2_hybrid":
@@ -162,11 +165,14 @@ def build_dataset(
                 max_sources=cfg.model.max_sources,
                 num_heatmap_bins=cfg.model.heatmap_bins,
                 split="val",
+                split_mode=str(cfg.data.get("split_mode", "hash")),
                 val_ratio=float(cfg.data.get("val_ratio", 0.15)),
                 split_seed=int(cfg.data.get("split_seed", cfg.seed)),
                 use_manifest_cache=bool(cfg.data.get("use_manifest_cache", True)),
                 manifest_path=cfg.data.get("manifest_path"),
                 audio_cache_dir=cfg.data.get("audio_cache_dir"),
+                feature_cache_dir=cfg.data.get("feature_cache_dir"),
+                sample_cache_dir=cfg.data.get("sample_cache_dir"),
                 max_items=cfg.data.get("max_items"),
             )
         return RealMANRing2HybridDataset(
@@ -185,11 +191,14 @@ def build_dataset(
             array_radius_m=float(cfg.model.array_radius_m),
             sound_speed=float(cfg.model.sound_speed),
             split=split_override or str(cfg.data.get("split", "train")),
+            split_mode=str(cfg.data.get("split_mode", "hash")),
             val_ratio=float(cfg.data.get("val_ratio", 0.15)),
             split_seed=int(cfg.data.get("split_seed", cfg.seed)),
             use_manifest_cache=bool(cfg.data.get("use_manifest_cache", True)),
             manifest_path=cfg.data.get("manifest_path"),
             audio_cache_dir=cfg.data.get("audio_cache_dir"),
+            feature_cache_dir=cfg.data.get("feature_cache_dir"),
+            sample_cache_dir=cfg.data.get("sample_cache_dir"),
             max_items=cfg.data.get("max_items"),
             curriculum_ratio=float(cfg.data.get("curriculum_ratio", 1.0)),
             curriculum_size=cfg.data.get("curriculum_size"),
@@ -211,6 +220,7 @@ def build_dataset(
         frame_hop_seconds=cfg.data.frame_hop_seconds,
         num_heatmap_bins=cfg.model.heatmap_bins,
         audio_cache_dir=cfg.data.get("audio_cache_dir"),
+        feature_cache_dir=cfg.data.get("feature_cache_dir"),
     )
 
 
@@ -691,9 +701,14 @@ def main(cfg: DictConfig) -> None:
             json.dumps(dataset_summary, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+    include_center = bool(cfg.model.get("include_center_mic", False))
+    num_input = int(cfg.model.num_input_channels)
+    # 含中心麦时, num_input_channels 为总麦数 (圆周+1), make_uniform_circular_array 的 num_mics 取圆周数.
+    ring_mics = num_input - 1 if include_center else num_input
     mic_positions = make_uniform_circular_array(
-        num_mics=cfg.model.num_input_channels,
+        num_mics=ring_mics,
         radius=float(cfg.model.array_radius_m),
+        include_center=include_center,
     )
     # 构建UCA8TrackTrendNet模型: 前端 + 三路编码器 + TCN骨干 + 多头解码
     model = UCA8TrackTrendNet(
@@ -727,6 +742,7 @@ def main(cfg: DictConfig) -> None:
         use_ipd=bool(cfg.model.get("use_ipd", True)),
         use_srp=bool(cfg.model.get("use_srp", True)),
         use_vad=bool(cfg.model.get("use_vad", True)),
+        feature_cache_dir=cfg.data.get("feature_cache_dir"),
     )
     # 构建多任务损失: ~15项损失的加权和
     criterion = TrackTrendMultiTaskLoss(
@@ -855,7 +871,11 @@ def main(cfg: DictConfig) -> None:
         for step_in_epoch, batch in enumerate(epoch_iterator, start=start_step_in_epoch):
             last_step_in_epoch = step_in_epoch + 1
             optimizer.zero_grad(set_to_none=True)
-            predictions = model(batch["waveform"], batch["vad_history"])  # 前向传播
+            predictions = model(
+                batch["waveform"],
+                batch["vad_history"],
+                sample_id=batch.get("sample_id"),
+            )  # 前向传播
             loss_dict = criterion(predictions, batch)                     # 计算多任务损失
             fabric.backward(loss_dict["loss"])                            # 反向传播
             fabric.clip_gradients(model, optimizer, max_norm=float(cfg.train.gradient_clip_val))  # 梯度裁剪

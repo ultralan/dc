@@ -1,0 +1,24 @@
+dataset_kind: realman_ring2
+root_dir: D:/RealMAN/ring1_9ch/extracted
+moving_csv: ${hydra:runtime.cwd}/realman_demo/raw/merged/train_val_moving_source_location.csv
+static_csv: ${hydra:runtime.cwd}/realman_demo/raw/merged/train_val_static_source_location.csv
+manifest_path: D:/RealMAN/ring1_9ch/extracted/.cache/realman_ring1_manifest.json
+use_manifest_cache: true
+audio_cache_dir: D:/RealMAN/ring1_9ch/extracted/.cache/audio_16k
+feature_cache_dir: D:/RealMAN/ring1_9ch/extracted/.cache/features_ring1_9ch
+sample_cache_dir: D:/RealMAN/ring1_9ch/extracted/.cache/sample_cache
+# RealMAN ring1 + 中心麦: CH1-CH8 (圆周) + CH0 (中心), 对齐官方 CRNN use_mic_id.
+channel_ids: [1, 2, 3, 4, 5, 6, 7, 8, 0]
+model_sample_rate: 16000
+input_sample_rate: 16000
+history_frames: ${model.history_frames}
+future_frames: ${model.future_frames}
+split: all
+split_mode: official
+val_ratio: 0.15
+split_seed: ${seed}
+frame_hop_seconds: 0.01
+window_stride_frames: 10
+max_sources: ${model.max_sources}
+synthetic_size: 32
+max_items: null

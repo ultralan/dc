@@ -1,6 +1,7 @@
 dataset_kind: locata_like
 root_dir: ${hydra:runtime.cwd}/dev
 audio_cache_dir: ${hydra:runtime.cwd}/dev/.cache/audio_16k
+feature_cache_dir: ${hydra:runtime.cwd}/dev/.cache/features
 input_sample_rate: 48000
 model_sample_rate: 16000
 channel_mode: first_n

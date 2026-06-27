@@ -127,6 +127,7 @@ def build_dataset(cfg: DictConfig) -> torch.utils.data.Dataset:
         frame_hop_seconds=float(cfg.data.frame_hop_seconds),
         num_heatmap_bins=int(cfg.model.heatmap_bins),
         audio_cache_dir=cfg.data.get("audio_cache_dir"),
+        feature_cache_dir=cfg.data.get("feature_cache_dir"),
     )
 
 
@@ -161,6 +162,7 @@ def build_model(cfg: DictConfig, device: torch.device) -> UCA8TrackTrendNet:
         ),
         num_count_classes=int(cfg.model.num_count_classes),
         sound_speed=float(cfg.model.sound_speed),
+        feature_cache_dir=cfg.data.get("feature_cache_dir"),
     ).to(device)
     return model
 
@@ -402,7 +404,7 @@ def main() -> None:
             sample = dataset[index]
             batch_waveform = sample["waveform"].unsqueeze(0).to(device)
             batch_vad = sample["vad_history"].unsqueeze(0).to(device)
-            predictions = model(batch_waveform, batch_vad)
+            predictions = model(batch_waveform, batch_vad, sample_id=sample["sample_id"])
             file_name = sample["sample_id"].replace(":", "__") + ".png"
             sample_summary = render_sample_figure(
                 sample=sample,

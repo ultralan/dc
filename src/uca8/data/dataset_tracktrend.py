@@ -106,6 +106,7 @@ class LocataLikeTrackTrendDataset(Dataset[dict[str, Any]]):
         frame_hop_seconds: float = 0.01,
         num_heatmap_bins: int = 72,
         audio_cache_dir: str | Path | None = None,
+        feature_cache_dir: str | Path | None = None,
     ) -> None:
         """初始化 LOCATA-like 数据集.
 
@@ -120,6 +121,9 @@ class LocataLikeTrackTrendDataset(Dataset[dict[str, Any]]):
         self.max_sources = max_sources
         self.frame_hop_seconds = frame_hop_seconds
         self.audio_cache_dir = Path(audio_cache_dir) if audio_cache_dir is not None else None
+        self.feature_cache_dir = (
+            Path(feature_cache_dir) if feature_cache_dir is not None else None
+        )
         self.label_builder = TrackTrendLabelBuilder(
             num_heatmap_bins=num_heatmap_bins,
             max_sources=max_sources,

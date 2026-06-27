@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
@@ -23,7 +24,12 @@ from uca8.metrics import (
 from uca8.models.tracktrend_net import UCA8TrackTrendNet
 from uca8.features.stft import MultiChannelSTFT
 from uca8.features.srp_phat import SRPPHAT
-from uca8.geometry.uca8 import azimuth_grid, default_mic_pairs
+from uca8.geometry.uca8 import azimuth_grid, infer_mic_pairs, wrap_angle
+
+
+def wrap_angle_deg(angles_deg: torch.Tensor) -> torch.Tensor:
+    """把度数角度 wrap 到 [-180, 180)."""
+    return wrap_angle(torch.deg2rad(angles_deg)) * (180.0 / math.pi)
 
 
 def parse_args() -> argparse.Namespace:
@@ -97,9 +103,13 @@ def compute_srp_peak_metrics(
     cfg: Any,
 ) -> dict[str, Any]:
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0)
+    include_center = bool(cfg.model.get("include_center_mic", False))
+    num_input = int(cfg.model.num_input_channels)
+    ring_mics = num_input - 1 if include_center else num_input
     mic_positions = make_uniform_circular_array(
-        num_mics=int(cfg.model.num_input_channels),
+        num_mics=ring_mics,
         radius=float(cfg.model.array_radius_m),
+        include_center=include_center,
         device=device,
     )
     stft = MultiChannelSTFT(
@@ -111,7 +121,7 @@ def compute_srp_peak_metrics(
         sample_rate=int(cfg.feature.sample_rate),
         n_fft=int(cfg.feature.n_fft),
         mic_positions=mic_positions,
-        mic_pairs=default_mic_pairs(int(cfg.model.num_input_channels)),
+        mic_pairs=infer_mic_pairs(mic_positions),
         azimuths=azimuth_grid(int(cfg.model.heatmap_bins), device=device),
         sound_speed=float(cfg.model.sound_speed),
     ).to(device)
@@ -125,6 +135,9 @@ def compute_srp_peak_metrics(
             target_angle, target_valid = target_slot_primary_azimuth_deg(batch["slot_state"].to(device))
             srp_map = srp(stft(waveform))
             srp_peak = heatmap_logits_to_azimuth_deg(srp_map)
+            # SRP-PHAT 的远场 steering 方向约定与 dataset GT 坐标系相反 (差 180°),
+            # 直接解码会得到镜像方位. 这里加 180° 并 wrap 回 [-180,180), 与 GT 对齐.
+            srp_peak = wrap_angle_deg(srp_peak + 180.0)
             sample_ids = batch["sample_id"]
             for item_idx, sample_id in enumerate(sample_ids):
                 motion = str(sample_id).split(":")[1] if ":" in str(sample_id) else "unknown"
@@ -167,19 +180,26 @@ def build_dataset(cfg: Any, split: str) -> RealMANRing2Dataset:
         max_sources=int(cfg.model.max_sources),
         num_heatmap_bins=int(cfg.model.heatmap_bins),
         split=split,
+        split_mode=str(cfg.data.get("split_mode", "hash")),
         val_ratio=float(cfg.data.val_ratio),
         split_seed=int(cfg.data.split_seed),
         use_manifest_cache=bool(cfg.data.use_manifest_cache),
         manifest_path=cfg.data.manifest_path,
         audio_cache_dir=cfg.data.get("audio_cache_dir"),
+        feature_cache_dir=cfg.data.get("feature_cache_dir"),
+        sample_cache_dir=cfg.data.get("sample_cache_dir"),
         max_items=cfg.data.get("max_items"),
     )
 
 
 def build_model(cfg: Any, device: torch.device) -> UCA8TrackTrendNet:
+    include_center = bool(cfg.model.get("include_center_mic", False))
+    num_input = int(cfg.model.num_input_channels)
+    ring_mics = num_input - 1 if include_center else num_input
     mic_positions = make_uniform_circular_array(
-        num_mics=int(cfg.model.num_input_channels),
+        num_mics=ring_mics,
         radius=float(cfg.model.array_radius_m),
+        include_center=include_center,
         device=device,
     )
     return UCA8TrackTrendNet(
@@ -208,6 +228,7 @@ def build_model(cfg: Any, device: torch.device) -> UCA8TrackTrendNet:
         ),
         num_count_classes=int(cfg.model.num_count_classes),
         sound_speed=float(cfg.model.sound_speed),
+        feature_cache_dir=cfg.data.get("feature_cache_dir"),
     ).to(device)
 
 
@@ -231,7 +252,11 @@ def main() -> None:
                 break
             waveform = batch["waveform"].to(device)
             vad_history = batch["vad_history"].to(device)
-            predictions = model(waveform, vad_history=vad_history)
+            predictions = model(
+                waveform,
+                vad_history=vad_history,
+                sample_id=batch.get("sample_id"),
+            )
 
             target_angle, target_valid = target_slot_primary_azimuth_deg(
                 batch["slot_state"].to(device)

@@ -263,7 +263,11 @@ def build_rollout(
         batch_waveform = history_waveform.unsqueeze(0).to(device)
         batch_vad = vad_history.unsqueeze(0).unsqueeze(-1).to(device)
         with torch.no_grad():
-            predictions = model(batch_waveform, batch_vad)
+            predictions = model(
+                batch_waveform,
+                batch_vad,
+                sample_id=f"{args.scenario}:step{step:02d}",
+            )
 
         current_heat_pred = torch.sigmoid(predictions["heatmap_logits"][0]).cpu()
         future_heat_pred = torch.sigmoid(predictions["future_heatmap_logits"][0]).cpu()

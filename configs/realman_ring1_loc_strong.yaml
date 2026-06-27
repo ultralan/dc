@@ -1,0 +1,10 @@
+defaults:
+  - model: uca8_realman_ring1
+  - data: realman_ring1
+  - feature: stft_16k
+  - train: realman_ring1_loc_strong
+  - runtime: local
+  - _self_
+
+experiment_name: realman_ring1_loc_strong
+seed: 42

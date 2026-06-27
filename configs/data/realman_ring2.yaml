@@ -5,12 +5,17 @@ static_csv: ${hydra:runtime.cwd}/realman_demo/raw/val/val_static_source_location
 manifest_path: ${hydra:runtime.cwd}/realman_demo/extracted/ring2_8ch/.cache/realman_ring2_manifest.json
 use_manifest_cache: true
 audio_cache_dir: ${hydra:runtime.cwd}/realman_demo/extracted/ring2_8ch/.cache/audio_16k
+feature_cache_dir: ${hydra:runtime.cwd}/realman_demo/extracted/ring2_8ch/.cache/features_ring2_8ch
+sample_cache_dir: ${hydra:runtime.cwd}/realman_demo/extracted/ring2_8ch/.cache/sample_cache
 channel_ids: [9, 10, 11, 12, 13, 14, 15, 16]
 model_sample_rate: 16000
 input_sample_rate: 16000
 history_frames: ${model.history_frames}
 future_frames: ${model.future_frames}
 split: all
+# split_mode: "official" 按 RealMAN 官方 utterance 前缀(TRAIN_/VAL_)过滤, 无泄漏;
+#             "hash" 按 sample_id 哈希切 val_ratio(有场景/说话人泄漏, 仅历史兼容).
+split_mode: official
 val_ratio: 0.15
 split_seed: ${seed}
 frame_hop_seconds: 0.01

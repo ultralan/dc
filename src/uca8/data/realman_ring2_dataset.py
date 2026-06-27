@@ -18,6 +18,7 @@ import csv
 import hashlib
 import json
 import math
+import os
 from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -33,7 +34,24 @@ from torch.utils.data import Dataset
 from uca8.data.label_builder import TrackTrendLabelBuilder
 from uca8.utils.audio_io import load_audio_file
 
-MANIFEST_VERSION = 1
+MANIFEST_VERSION = 2
+
+# 整样本缓存返回字典的字段集合, 用于命中时轻校验(防止脏/旧缓存静默返回).
+_SAMPLE_CACHE_KEYS = frozenset(
+    {
+        "waveform",
+        "vad_history",
+        "count",
+        "heatmap",
+        "slot_state",
+        "future_count",
+        "future_heatmap",
+        "future_slot_state",
+        "trend_class",
+        "sample_id",
+    }
+)
+
 
 
 @dataclass(slots=True)
@@ -106,6 +124,41 @@ def _find_angle_column(row: dict[str, str]) -> str:
         if key.startswith("angle"):
             return key
     raise KeyError("Could not find angle column in RealMAN CSV row.")
+
+
+# RealMAN 用 -10000 标记 distance/ele 未标注的 sentinel; angle 为空表示方位未标注.
+# 这些行没有完整定位标签, 进入训练会让 slot 回归 loss 爆炸, 必须在扫描时过滤.
+_SENTINEL_VALUE = -10000.0
+
+
+def _is_valid_annotation(row: dict[str, str]) -> bool:
+    """判断一行 RealMAN 标注是否可用于训练(方位角非空, 且 distance/ele 非 sentinel).
+
+    - angle 列为空 → 方位未标注, 丢弃;
+    - distance 或 ele 含 -10000 sentinel → 距离/高度无效, 丢弃.
+    序列单元格(逗号分隔)只要任一元素无效即判整行无效, 避免插值后混入异常值.
+    """
+    try:
+        angle_col = _find_angle_column(row)
+    except KeyError:
+        return False
+    angle_value = str(row.get(angle_col, "")).strip()
+    if not angle_value:
+        return False
+    for col in ("distance", "ele"):
+        raw = str(row.get(col, "")).strip()
+        if not raw:
+            continue
+        for part in raw.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            try:
+                if float(part) <= _SENTINEL_VALUE:
+                    return False
+            except ValueError:
+                return False
+    return True
 
 
 def _canonical_rel_key_from_csv_filename(filename: str) -> str:
@@ -195,11 +248,14 @@ class RealMANRing2Dataset(Dataset[dict[str, Any]]):
         max_sources: int = 4,
         num_heatmap_bins: int = 72,
         split: str = "all",
+        split_mode: str = "hash",
         val_ratio: float = 0.15,
         split_seed: int = 42,
         use_manifest_cache: bool = True,
         manifest_path: str | Path | None = None,
         audio_cache_dir: str | Path | None = None,
+        feature_cache_dir: str | Path | None = None,
+        sample_cache_dir: str | Path | None = None,
         max_items: int | None = None,
     ) -> None:
         """初始化 RealMAN ring2 数据集.
@@ -219,15 +275,25 @@ class RealMANRing2Dataset(Dataset[dict[str, Any]]):
         self.max_sources = max_sources
         self.channel_ids = tuple(channel_ids)
         self.split = split
+        # split_mode: "hash" = 按 sample_id 哈希切 val_ratio(历史行为, 有场景/说话人泄漏);
+        #             "official" = 按 RealMAN 官方 utterance 前缀(TRAIN_/VAL_)过滤, 无泄漏.
+        self.split_mode = str(split_mode)
         self.val_ratio = val_ratio
         self.split_seed = split_seed
+        self.num_heatmap_bins = num_heatmap_bins
         self.use_manifest_cache = use_manifest_cache
+        self.audio_cache_dir = Path(audio_cache_dir) if audio_cache_dir is not None else None
+        self.feature_cache_dir = (
+            Path(feature_cache_dir) if feature_cache_dir is not None else None
+        )
+        self.sample_cache_dir = (
+            Path(sample_cache_dir) if sample_cache_dir is not None else None
+        )
         self.manifest_path = (
             Path(manifest_path)
             if manifest_path is not None
             else self.root_dir / ".cache" / "realman_ring2_manifest.json"
         )
-        self.audio_cache_dir = Path(audio_cache_dir) if audio_cache_dir is not None else None
         self.label_builder = TrackTrendLabelBuilder(
             num_heatmap_bins=num_heatmap_bins,
             max_sources=max_sources,
@@ -235,15 +301,41 @@ class RealMANRing2Dataset(Dataset[dict[str, Any]]):
         )
         base_records = self._load_or_build_records()
         split_records = self._apply_split(base_records)
+        self.max_items = max_items
         self.records = split_records if max_items is None else split_records[:max_items]
+        self._sample_cache_signature = self._build_sample_cache_signature()
 
     def __len__(self) -> int:
         """返回当前 split 下的样本数量."""
         return len(self.records)
 
     def __getitem__(self, index: int) -> dict[str, Any]:
-        """读取一个 RealMAN 样本并构造模型训练字典."""
+        """读取一个 RealMAN 样本并构造模型训练字典.
+
+        启用 ``sample_cache_dir`` 时, 完整样本字典(波形+标签)按 ``sample_id`` 缓存到磁盘,
+        命中则直接 ``torch.load`` 单文件, 避开每步 9 路音频解码与标签构建的开销; 未命中则
+        现算并原子落盘, 下次复用. 这让 ``num_workers=0`` 也能快速训练(绕开多进程内存瓶颈).
+        """
         record = self.records[index]
+        cache_path = self._sample_cache_path(record.sample_id)
+        if cache_path is not None and cache_path.exists():
+            payload = torch.load(cache_path, map_location="cpu", weights_only=False)
+            if self._sample_cache_payload_ok(payload):
+                return payload
+        sample = self._compute_sample(record)
+        if cache_path is not None:
+            self._write_sample_cache(cache_path, sample)
+        return sample
+
+    @staticmethod
+    def _sample_cache_payload_ok(payload: dict[str, Any]) -> bool:
+        """轻校验: 命中的缓存必须是 dict 且字段集合与契约一致, 否则视为 miss 重算."""
+        if not isinstance(payload, dict):
+            return False
+        return set(payload.keys()) == _SAMPLE_CACHE_KEYS
+
+    def _compute_sample(self, record: RealMANRecord) -> dict[str, Any]:
+        """读取音频并构造模型训练字典(纯确定性, 可缓存)."""
         waveform, dp_waveform = self._load_record_audio(record)
         total_available_frames = max(1, math.ceil(waveform.shape[-1] / self.hop_length))
 
@@ -311,6 +403,53 @@ class RealMANRing2Dataset(Dataset[dict[str, Any]]):
             "sample_id": record.sample_id,
         }
 
+    def _build_sample_cache_signature(self) -> str:
+        """构造整样本缓存的数据集签名.
+
+        任何会改变 ``__getitem__`` 输出的参数都进入签名, 以保证不同配置读到各自缓存、
+        改参后自动生成新键(旧缓存成孤儿但不被误用).
+        """
+        payload = {
+            "version": MANIFEST_VERSION,
+            "channel_ids": list(self.channel_ids),
+            "model_sample_rate": self.model_sample_rate,
+            "history_frames": self.history_frames,
+            "future_frames": self.future_frames,
+            "hop_length": self.hop_length,
+            "max_sources": self.max_sources,
+            "num_heatmap_bins": self.num_heatmap_bins,
+            "split": self.split,
+            "val_ratio": self.val_ratio,
+            "split_seed": self.split_seed,
+            "max_items": self.max_items,
+            "moving_csv": self._csv_signature(self.moving_csv),
+            "static_csv": self._csv_signature(self.static_csv),
+        }
+        return hashlib.sha1(
+            json.dumps(payload, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+
+    def _sample_cache_path(self, sample_id: str) -> Path | None:
+        """返回某个 sample_id 的缓存文件路径; 未启用缓存时返回 None."""
+        if self.sample_cache_dir is None:
+            return None
+        digest = hashlib.sha1(
+            f"{MANIFEST_VERSION}:{self._sample_cache_signature}:{sample_id}".encode("utf-8")
+        ).hexdigest()
+        return self.sample_cache_dir / f"{digest}.pt"
+
+    @staticmethod
+    def _write_sample_cache(path: Path, sample: dict[str, Any]) -> None:
+        """原子写整样本缓存: 先写进程专属临时文件, 再 replace 到目标路径."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = path.with_suffix(f".{os.getpid()}.tmp")
+        try:
+            torch.save(sample, tmp_path)
+            tmp_path.replace(path)
+        finally:
+            if tmp_path.exists():
+                tmp_path.unlink(missing_ok=True)
+
     def summary(self) -> dict[str, Any]:
         """返回数据集概览, 用于日志和实验记录."""
         scenes = Counter(record.scene for record in self.records)
@@ -321,6 +460,14 @@ class RealMANRing2Dataset(Dataset[dict[str, Any]]):
             "audio_cache_enabled": self.audio_cache_dir is not None,
             "audio_cache_dir": (
                 str(self.audio_cache_dir) if self.audio_cache_dir is not None else None
+            ),
+            "feature_cache_enabled": self.feature_cache_dir is not None,
+            "feature_cache_dir": (
+                str(self.feature_cache_dir) if self.feature_cache_dir is not None else None
+            ),
+            "sample_cache_enabled": self.sample_cache_dir is not None,
+            "sample_cache_dir": (
+                str(self.sample_cache_dir) if self.sample_cache_dir is not None else None
             ),
             "scenes": dict(scenes),
             "motions": dict(motions),
@@ -358,6 +505,10 @@ class RealMANRing2Dataset(Dataset[dict[str, Any]]):
             if row is None:
                 continue
             if len(rel_path.parts) < 4:
+                continue
+            # 过滤掉标注无效的行(angle 空 或 distance/ele 含 -10000 sentinel),
+            # 否则 sentinel 会经插值混入 rho/omega, 导致 slot 回归 loss 爆炸.
+            if not _is_valid_annotation(row):
                 continue
             utterance_id = dp_path.stem
             scene = rel_path.parts[0]
@@ -424,7 +575,40 @@ class RealMANRing2Dataset(Dataset[dict[str, Any]]):
         )
 
     def _apply_split(self, records: list[RealMANRecord]) -> list[RealMANRecord]:
-        """按 scene/motion 分组做稳定 train/val split."""
+        """按配置切分 train/val.
+
+        split_mode="official": 按 RealMAN 官方 utterance 前缀过滤, 无泄漏.
+        split_mode="hash": 按 sample_id 哈希切 val_ratio(历史行为).
+        """
+        if self.split_mode == "official":
+            return self._apply_official_split(records)
+        return self._apply_hash_split(records)
+
+    @staticmethod
+    def _official_tag(utterance_id: str) -> str:
+        """从 utterance_id 提取官方 split 标签(train/val/test/all)."""
+        upper = utterance_id.upper()
+        if upper.startswith("TRAIN_"):
+            return "train"
+        if upper.startswith("VAL_"):
+            return "val"
+        if upper.startswith("TEST_"):
+            return "test"
+        return "unknown"
+
+    def _apply_official_split(self, records: list[RealMANRecord]) -> list[RealMANRecord]:
+        """按官方前缀过滤. split=all 返回全部, 否则只保留对应前缀的样本."""
+        if self.split == "all":
+            return records
+        if self.split not in {"train", "val", "test"}:
+            raise ValueError(
+                f"split_mode=official 仅支持 split in [all,train,val,test], 得到 {self.split!r}."
+            )
+        selected = [r for r in records if self._official_tag(r.utterance_id) == self.split]
+        return sorted(selected, key=lambda record: record.sample_id)
+
+    def _apply_hash_split(self, records: list[RealMANRecord]) -> list[RealMANRecord]:
+        """按 scene/motion 分组做稳定 train/val hash split."""
         if self.split == "all":
             return records
         if self.split not in {"train", "val"}:

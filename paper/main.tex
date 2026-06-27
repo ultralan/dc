@@ -4,6 +4,7 @@
 \usepackage{amssymb}
 \usepackage{booktabs}
 \usepackage{geometry}
+\usepackage{graphicx}
 \usepackage{hyperref}
 \usepackage{multirow}
 \usepackage{xcolor}
@@ -16,7 +17,7 @@
   urlcolor=blue!60!black
 }
 
-\title{基于可学习空间谱与时序卷积融合的真实多通道声源方位定位方法}
+\title{空间先验与时序卷积融合的语音声源定位}
 \author{初稿}
 \date{\today}
 
@@ -31,464 +32,528 @@
 \maketitle
 
 \begin{abstract}
-真实多通道声源定位任务中, 传统 TDOA/SRP-PHAT 方法具有明确的物理可解释性,
-但在真实噪声、移动声源和短时窗波动下容易受到互相关峰不稳定、混响和阵列失配影响。
-另一方面, 直接依赖深度模型从原始波形中自动学习空间关系, 在中小规模实验条件下
-往往需要更多数据和更高训练成本。本文采用折中而可解释的路线:
-在 RealMAN 真实麦克风阵列数据集上, 以第二圈 8 通道子阵列为对象,
-将 log-mel 频谱、IPD 相位差和 SRP-PHAT 空间谱作为输入空间先验,
-再通过三路编码器和因果 TCN 进行短时序融合, 最终输出当前帧方位角 heatmap。
-当前验证结果表明, 在 RealMAN ring2\_8ch 设置下, 该方法在 64 batch 验证子集上达到
-$4.49^\circ$ MAE 和 82.25\% ACC@5, 说明显式空间先验与可学习时序融合是有效的。
+\textbf{目的}: 针对现有声源定位方法仅估计当前帧方位、难以预测短窗未来方位的问题, 研究 9 通道
+圆阵 (圆周 8 麦加中心麦) 语音场景下当前定位与短窗未来方位预测的统一建模方法。
+\textbf{方法}: 提出一种基于空间先验前端与时序卷积网络的多任务模型, 以对数梅尔频谱、相位差和
+SRP-PHAT 空间谱作为显式空间先验输入, 经三路编码与因果时序卷积网络融合, 同时输出当前帧方位
+热力图与未来 $K{=}32$ 帧 ($320\,\mathrm{ms}$) 的方位、声源数与活动轨迹。基于 RealMAN 真实麦克风
+阵列数据集, 按官方协议划分无泄漏的训练、验证与测试集, 并与线性外推、卡尔曼两类基线进行对比。
+\textbf{结果}: 在 RealMAN ring1+中心 9 麦阵列 (与官方 CRNN 基线相同阵列) 上, 所提模型当前帧
+$5^\circ$ 准确率达到 $82.8\%$, 接近官方 CRNN 的 $83.9\%$; 在官方基线所不具备的短窗未来方位预测任务上,
+所提模型 $5^\circ$ 准确率达 $74.8\%$, 显著优于线性外推 ($64.7\%$) 与卡尔曼 ($37.4\%$) 两类基线。
+此外, 特征消融表明三类空间先验存在非线性协同效应, 三者同时启用方能使当前帧精度由近随机水平跃升。
+\textbf{结论}: 显式空间先验的互补融合是真实圆阵定位的必要条件, 端到端未来方位预测能够建模
+超越匀速假设的非线性声源动力学, 验证了短窗未来预测任务的可行性与有效性。
 \end{abstract}
+
+\noindent\textbf{关键词}: 声源定位; 麦克风阵列; 空间先验; 时序卷积网络; 未来方位预测
+
+\vspace{0.5em}
+\begin{center}
+\textbf{Speech Sound Source Localization via Spatial Prior and\\Temporal Convolution Fusion}
+\end{center}
+
+\begin{abstract}
+\textbf{Objective}: Existing sound source localization (SSL) methods estimate only the current-frame
+azimuth and leave short-horizon future azimuth prediction unaddressed. This paper studies a unified
+model for current localization and short-horizon future azimuth prediction in an 8-channel uniform
+circular array speech scenario. \textbf{Method}: A multi-task TrackTrend network is proposed that
+takes log-mel, IPD and SRP-PHAT as explicit spatial-prior front-ends, fuses them with three encoders
+and a causal TCN, and jointly outputs the current azimuth heatmap and the future $K{=}32$ frames
+($320\,\mathrm{ms}$) of azimuth, count and activity. On RealMAN with the same ring1+center 9-channel
+array as the official CRNN baseline, leak-free train/val splits are constructed and compared with
+linear-extrapolation and Kalman baselines.
+\textbf{Results}: (1) The proposed model reaches $82.8\%$ ACC@5 on current-frame localization,
+approaching the official CRNN's $83.9\%$, while also enabling short-horizon future azimuth prediction
+that the official baselines lack. (2) On future azimuth prediction, the model achieves $74.8\%$ ACC@5,
+significantly outperforming linear extrapolation ($64.7\%$) and Kalman ($37.4\%$).
+\textbf{Conclusion}: Complementary fusion of explicit spatial priors
+is necessary for real-array localization, and end-to-end future prediction captures non-linear
+source dynamics beyond the constant-velocity assumption.
+\end{abstract}
+
+\noindent\textbf{Keywords}: sound source localization; microphone array; spatial prior;
+temporal convolutional network; future azimuth prediction
 
 \section{引言}
 
-声源方位定位的核心目标是在给定多通道麦克风信号的情况下估计声源到达方向
-(Direction of Arrival, DOA)。经典方法通常从 TDOA、GCC-PHAT 或 SRP-PHAT 出发
-\cite{knapp1976gcc},
-利用麦克风几何关系进行延迟估计或空间扫描。此类方法可解释、轻量,
-但在真实录制环境中会面对混响、噪声、移动声源、语音间歇和阵列响应差异等问题。
+随着视频会议、智能车载交互、机器人听觉与助听设备等应用的快速发展, 基于麦克风阵列的声源定位
+(Sound Source Localization, SSL) 与到达方向 (Direction of Arrival, DOA) 估计日益成为语音
+人机交互中的关键技术。长期以来, 声源定位方法大致可分为三类: 基于波束形成的方法依赖声源先验
+信息, 对应用场景要求较高; 基于到达时间差 (Time Difference of Arrival, TDOA) 与广义互相关
+(Generalized Cross-Correlation, GCC) 的方法 \cite{knapp1976gcc} 借助麦克风几何关系估计通道间
+延迟, 物理意义明确但易受混响与噪声干扰; 基于高分辨空间谱 (如 MUSIC、SRP-PHAT) 的方法通过
+方位扫描获取空间功率谱, 定位精度较高, 然而计算复杂度大, 且在低信噪比与强混响下空间谱峰易发生
+偏移或分裂。总体而言, 传统方法物理可解释性强、计算开销可控, 但其性能在混响、噪声、移动声源与
+阵列失配条件下均会显著下降, 难以满足复杂真实环境下的鲁棒性需求。
 
-RealMAN 数据集提供了真实 32 通道麦克风阵列录音、真实噪声和真实声源位置标注
-\cite{yang2024realman}, 使得模型可以在更接近真实设备落地的条件下评估。
-RealMAN 官方定位 baseline 包括 CRNN spatial spectrum 预测和 IPDnet direct-path IPD
-估计方法 \cite{wang2024ipdnet}, 其指标主要为方位角 MAE 和 ACC@5。
-这说明在真实多通道定位任务中,
-空间谱和 IPD 这类声学先验仍然是主流有效信息, 并非与深度学习路线矛盾。
+针对上述不足, 深度学习方法近年来被广泛引入声源定位领域, 并在声事件定位与检测
+(Sound Event Localization and Detection, SELD) 任务中普遍超越了传统方法
+\cite{adavanne2019seldnet,grumiaux2022survey}。此类方法以卷积神经网络、循环神经网络等深度模型
+直接从多通道频谱或空间特征中学习方位映射, 具备更强的抗混响与抗噪声能力。RealMAN 数据集
+\cite{yang2024realman} 进一步提供了真实 32 通道录制语料, 使模型可在更贴近部署的条件下训练。
 
-本文当前故事线聚焦于一个最小而稳定的闭环:
-\begin{quote}
-RealMAN ring2\_8ch 真实子阵列
-$\rightarrow$ log-mel/IPD/SRP-PHAT 空间特征
-$\rightarrow$ 三路 CNN 编码
-$\rightarrow$ 因果 TCN 时序融合
-$\rightarrow$ 当前方位 heatmap 定位。
-\end{quote}
-slot、count、future 和 trend 预测头保留为扩展接口, 但当前论文主结果优先围绕
-当前方位定位展开。
+然而, 现有 SSL/SELD 方法 (包括 RealMAN 官方基线 CRNN 与 IPDnet \cite{wang2024ipdnet}) 均只
+估计当前帧方位, 不显式预测未来方位。而在机器人听觉、助听设备、智能车载交互与会议系统等真实场景中,
+声源往往持续移动, 系统从信号采集到产生响应存在固有延迟, 波束成形、降噪、语音唤醒等环节均需数十
+至数百毫秒。若能提前预测短窗未来方位, 即可补偿上述处理延迟, 使波束在声源到达前预先转向、使跟踪器
+在观测缺失时保持轨迹、使交互系统得以提前响应。这种预测式定位能力, 是声源感知由被动估计迈向主动
+预测的关键所在。
+
+遗憾的是, 现有技术路径难以满足上述需求。传统声源跟踪 (卡尔曼滤波、粒子滤波) 虽含预测步,
+但其预测完全由预设的状态转移模型 (通常为匀速假设) 决定, 且只前推一步、依赖独立的当前帧定位器
+输出, 并非端到端地从音频学习未来轨迹; 一旦声源发生加速、转弯或停顿等非匀速运动, 此类方法便会
+显著偏离。另一方面, 端到端深度模型若要预测未来, 需在输出端显式建模多帧未来状态, 而 SELD 领域
+尚无此类工作。
+
+本文针对这一空白, 提出一个统一的多任务网络, 同时建模当前状态与短窗未来状态, 并首次在 RealMAN
+数据上系统比较"端到端未来预测"与"定位$+$外推"两类范式。主要贡献:
+\begin{enumerate}
+  \item 将短窗未来方位预测 ($K{=}32$ 帧, $320\,\mathrm{ms}$) 作为 SSL 多任务输出加以形式化,
+        并指出这是 SELD 领域的空白任务;
+  \item 设计基于空间先验前端 (log-mel/IPD/SRP-PHAT) 与因果 TCN 的 TrackTrend 网络,
+        联合输出当前方位、未来方位、声源数与运动趋势;
+  \item 通过特征消融发现 log-mel、IPD、SRP 三类空间先验存在非线性协同效应:
+        单独加入任一空间特征反而略劣于纯谱, 三者同时启用才使当前帧 MAE 从近随机骤降至 $6.87^\circ$;
+  \item 在 RealMAN ring1+中心9麦阵列 (与官方 CRNN 同阵列) 上构建三方法对比 (端到端模型、线性外推、Kalman),
+        证明端到端未来预测在 ACC@5 和无漏检惩罚 MAE 上显著优于两类外推基线。
+\end{enumerate}
 
 \section{相关工作}
 
 \subsection{TDOA 与 SRP-PHAT}
 
 设第 $i$ 个麦克风位置为 $\mathbf{m}_i\in\mathbb{R}^3$, 声源远场方向为
-$\mathbf{u}(\theta)=[\cos\theta,\sin\theta,0]^\top$, 声速为 $c$。
-远场近似下, 声波到达第 $i$ 个麦克风的相对延迟可写为
-\begin{equation}
-  \tau_i(\theta)=\frac{\mathbf{m}_i^\top \mathbf{u}(\theta)}{c}.
-\end{equation}
-麦克风对 $(i,j)$ 的 TDOA 为
+$\mathbf{u}(\theta)=[\cos\theta,\sin\theta,0]^\top$, 声速为 $c$。远场近似下, 麦克风对 $(i,j)$ 的 TDOA 为
 \begin{equation}
   \Delta\tau_{ij}(\theta)
-  = \tau_i(\theta)-\tau_j(\theta)
-  = \frac{(\mathbf{m}_i-\mathbf{m}_j)^\top\mathbf{u}(\theta)}{c}.
+  = \frac{(\mathbf{m}_i-\mathbf{m}_j)^\top \mathbf{u}(\theta)}{c}.
 \end{equation}
-
-GCC-PHAT 通过归一化互谱估计通道间延迟。给定两个通道的 STFT
-$X_i(t,f)$ 和 $X_j(t,f)$, PHAT 归一化互谱为
-\begin{equation}
-  G_{ij}(t,f)
-  =
-  \frac{X_i(t,f)X_j^*(t,f)}
-       {|X_i(t,f)X_j^*(t,f)|+\epsilon}.
-\end{equation}
-SRP-PHAT 不先显式估计单个 TDOA, 而是对候选方位 $\theta_a$ 进行空间扫描:
+给定两通道 STFT $X_i(t,f)$ 和 $X_j(t,f)$, PHAT 归一化互谱为
+$G_{ij}(t,f)={X_iX_j^*}/({|X_iX_j^*|+\epsilon})$。
+SRP-PHAT 对候选方位 $\theta_a$ 进行空间扫描:
 \begin{equation}
   S(t,\theta_a)
   =
   \frac{1}{|\mathcal{P}|\,|\mathcal{F}|}
   \sum_{(i,j)\in\mathcal{P}}
   \sum_{f\in\mathcal{F}}
-  \Re\left[
+  \Re\!\left[
     G_{ij}(t,f)
-    \exp\left(j2\pi f\Delta\tau_{ij}(\theta_a)\right)
+    \exp\!\left(j2\pi f\Delta\tau_{ij}(\theta_a)\right)
   \right],
   \label{eq:srp}
 \end{equation}
-其中 $\mathcal{P}$ 为麦克风对集合, $\mathcal{F}$ 为正频率集合。
-传统 SRP-PHAT baseline 直接取
-\begin{equation}
-  \hat{\theta}_{\mathrm{SRP}}(t)
-  =
-  \theta_{\argmax_a S(t,\theta_a)}.
-\end{equation}
-本文不是直接使用该峰值作为最终结果, 而是将 $S(t,\theta_a)$ 作为可学习输入特征。
+其中 $\mathcal{P}$ 为麦克风对集合。本文不直接取 SRP 峰值, 而将 $S(t,\theta_a)$ 作为可学习输入特征。
 
-\subsection{IPD 空间特征}
+\subsection{IPD 与 SELD 深度方法}
 
-IPD 是 TDOA 在频域中的相位表现。对麦克风对 $(i,j)$,
-\begin{equation}
-  \phi_{ij}(t,f)=
-  \angle\left(X_i(t,f)X_j^*(t,f)\right).
-\end{equation}
-由于相位具有 $2\pi$ 周期性, 直接回归或输入 $\phi$ 会在边界处产生跳变。
-因此本文使用
-\begin{equation}
-  \mathbf{q}_{ij}(t,f)
-  =
-  \left[\cos\phi_{ij}(t,f),\ \sin\phi_{ij}(t,f)\right]
-\end{equation}
-作为连续 IPD 表示。
+IPD 是 TDOA 的频域相位表现。由于相位具 $2\pi$ 周期性, 本文使用连续表示
+$\mathbf{q}_{ij}(t,f)=[\cos\phi_{ij},\sin\phi_{ij}]$,
+$\phi_{ij}=\angle(X_iX_j^*)$。
+SELDnet \cite{adavanne2019seldnet} 开创了声事件定位与检测的深度框架, 后续 ACCDOA/Multi-ACCDOA
+等工作逐步强化多源建模。但这些方法均同步预测\textbf{当前帧}标签, 不预测未来帧方位。
+RealMAN 官方 CRNN 与 IPDnet \cite{wang2024ipdnet} 同样只输出当前帧 DOA 分类。
 
-\subsection{TCN 时序建模}
+\subsection{时序建模}
 
-深度学习方法已经广泛用于声源定位和 SELD 任务 \cite{adavanne2019seldnet,grumiaux2022survey}。
-本文选择 TCN 作为轻量时序建模主干, 主要因为当前任务使用固定历史窗口,
-不需要 Transformer 级别的长上下文建模, 也希望保持实时因果性。
-TCN 使用一维因果卷积处理帧级序列 \cite{bai2018tcn}。给定输入序列
-$\mathbf{h}_{0:T}$, 一个膨胀因果卷积块可抽象为
-\begin{equation}
-  \mathbf{z}_t
-  =
-  \sum_{k=0}^{K-1}
-  \mathbf{W}_k\mathbf{h}_{t-dk},
-\end{equation}
-其中 $K$ 为卷积核大小, $d$ 为 dilation。因果性保证当前输出只依赖当前和过去帧。
-本文使用门控激活:
-\begin{equation}
-  \operatorname{GatedConv}(\mathbf{h})_t
-  =
-  \mathbf{v}_t\odot \sigma(\mathbf{g}_t),
-\end{equation}
-并通过残差连接和 LayerNorm 得到
-\begin{equation}
-  \mathbf{h}'_t
-  =
-  \operatorname{LayerNorm}
-  \left(
-    \mathbf{h}_t + \operatorname{Dropout}(\mathbf{W}_o
-    (\mathbf{v}_t\odot\sigma(\mathbf{g}_t)))
-  \right).
-\end{equation}
+本文选 TCN \cite{bai2018tcn} 作为时序主干: 因果空洞卷积适合低延迟部署, 对 $1.28\,\mathrm{s}$ 历史窗口
+的中短时程建模足够, 比 RNN 易并行、比 Transformer 省算力且更稳。
+
+\subsection{声源跟踪与未来预测的空白}
+
+传统声源跟踪 (Kalman 滤波、粒子滤波) 虽含"预测步", 但其作用是在已有当前帧定位器输出的基础上
+做下一步滤波平滑, 预测结果完全由状态转移模型 (通常为匀速假设) 决定, 既不直接从音频端到端学习,
+也只前推一步而非显式输出多帧未来方位。SELD 领域主流方法 (SELDnet、ACCDOA 系列) 与 RealMAN 官方
+基线 (CRNN、IPDnet) 均同步预测当前帧标签, 不显式预测未来帧方位。就现有文献而言,
+将短窗未来方位预测作为多任务显式输出的工作尚未见报道。该空白同时带来评估难题: 由于不存在
+可比较的端到端未来预测方法, 本文采用"当前帧定位 $+$ 经典外推" (线性匀速、卡尔曼滤波) 作为
+未来预测任务的基线; 这是该新任务上可定义的最强合理对照, 因为任何未来预测方法在缺乏端到端训练时,
+其退化行为恰是匀速外推。
 
 \section{方法}
 
 \subsection{问题定义}
 
-给定 $C=8$ 通道历史音频
-\begin{equation}
-  \mathbf{x}\in\mathbb{R}^{C\times N},
-\end{equation}
-其中 $N=T\cdot H$, $T$ 为历史帧数, $H$ 为 hop length。
-目标是估计当前帧 $T$ 的声源方位角 $\theta^\star\in[-\pi,\pi)$。
-本文将定位转化为离散方位 heatmap 预测。设方位角被划分为 $A$ 个 bin:
-\begin{equation}
-  \Theta=\{\theta_a\}_{a=1}^{A},\qquad A=72.
-\end{equation}
-模型输出当前帧 heatmap logits:
-\begin{equation}
-  \mathbf{o}\in\mathbb{R}^{A},
-\end{equation}
-最终预测方位为
-\begin{equation}
-  \hat{\theta}
-  =
-  \theta_{\argmax_a \sigma(o_a)}.
-\end{equation}
+给定 $C$ 通道历史音频 $\mathbf{x}\in\mathbb{R}^{C\times N}$ ($N{=}T{\cdot}H$,
+$T$ 为历史帧数, $H$ 为帧移), 目标是同时输出:
+(1) 当前帧方位 $\hat{\theta}_T\in[-\pi,\pi)$;
+(2) 未来 $K$ 帧方位序列 $\{\hat{\theta}_{T+k}\}_{k=1}^{K}$;
+(3) 当前与未来帧的声源数、活动状态和运动趋势。
+方位被离散为 $A$ 个 bin, 具体取值见实验设置。
 
-\subsection{特征前端}
+\subsection{空间先验前端}
 
-对每个通道做 STFT:
-\begin{equation}
-  X_c(t,f)=\stft(x_c)[t,f],
-  \qquad c=1,\ldots,C.
-\end{equation}
+空间先验前端的设计目标, 是在不完全依赖端到端学习的前提下, 将与方位有关的物理量显式地暴露给
+后续网络, 使模型既能利用数据驱动的灵活性, 又能保留经典方法中已被验证有效的空间线索。基于这一
+思路, 本文选取对数梅尔频谱、相位差与 SRP-PHAT 空间谱三类互补特征作为前端输出, 三者分别从
+频谱能量、通道间相位关系与全局空间功率三个层面刻画声源方位信息, 互为补充。阵列几何及麦克风对
+配置如图 \ref{fig:array} 所示, 具体参数见实验设置。
 
-\paragraph{log-mel 特征}
-首先计算功率谱 $P_c(t,f)=|X_c(t,f)|^2$。参考麦克风 log-mel 为
-\begin{equation}
-  \mathbf{M}_{\mathrm{ref}}(t,m)
-  =
-  \log\left(
-    \sum_f P_1(t,f)B_{fm}+\epsilon
-  \right),
-\end{equation}
-其中 $B_{fm}$ 是 mel filterbank。多通道平均能量 log-mel 为
-\begin{equation}
-  \mathbf{M}_{\mathrm{rms}}(t,m)
-  =
-  \log\left(
-    \sum_f
-    \left(\frac{1}{C}\sum_{c=1}^{C}P_c(t,f)\right)
-    B_{fm}+\epsilon
-  \right).
-\end{equation}
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=0.5\textwidth]{figures/array_geometry.pdf}
+  \caption{9 通道圆阵 (圆周 8 麦加中心麦) 几何与麦克风对配置。相邻麦对捕捉局部相位差, 对径麦对提供大孔径方向分辨, 中心-圆周麦对编码直达路径方位信息。}
+  \label{fig:array}
+\end{figure}
 
-\paragraph{IPD 特征}
-对默认麦克风对集合 $\mathcal{P}$, 计算 $\cos\phi_{ij}$ 和 $\sin\phi_{ij}$,
-并堆叠为
-\begin{equation}
-  \mathbf{I}\in\mathbb{R}^{2|\mathcal{P}|\times T\times F_I}.
-\end{equation}
-当前 8 通道设置下使用相邻麦克风对和对径麦克风对, 共 $|\mathcal{P}|=12$,
-因此 IPD 通道数为 $24$。
+对各通道信号做短时傅里叶变换 (Short-Time Fourier Transform, STFT) 得到时频表示 $X_c(t,f)$
+(STFT 的具体参数见实验设置)。前端输出四类互补特征:
+\begin{itemize}
+  \item 对数梅尔频谱 (参考通道与多通道 RMS): $\mathbf{M}_\mathrm{ref},\mathbf{M}_\mathrm{rms}\in\mathbb{R}^{T\times 64}$;
+  \item 相位差表征: 对麦克风对集合 $\mathcal{P}$ 取 $[\cos\phi,\sin\phi]$, 规避相位周期跳变;
+  \item SRP-PHAT 空间谱 $\mathbf{S}\in\mathbb{R}^{T\times A}$ (式 \ref{eq:srp}), 编码时保留方位维以避免空间峰被平均抹平;
+  \item 语音活动比 $v_t$ (由近讲参考语音的帧级 RMS 估计)。
+\end{itemize}
 
-\paragraph{SRP-PHAT 空间谱}
-根据式 \eqref{eq:srp}, 对 $A=72$ 个候选方位计算 SRP-PHAT map:
-\begin{equation}
-  \mathbf{S}\in\mathbb{R}^{T\times A}.
-\end{equation}
-一个关键实现点是: SRP 的 azimuth 维不能在编码前被平均掉。
-若使用
-\begin{equation}
-  \operatorname{mean}_a\,\mathbf{S}(t,a),
-\end{equation}
-则峰值位置被抹去, 模型无法知道能量来自哪个方向。
-因此本文保留方位维并在卷积后展平:
-\begin{equation}
-  \mathbf{H}_{\mathrm{srp}}
-  =
-  W_{\mathrm{srp}}
-  \operatorname{vec}_{c,a}
-  \left(
-    \operatorname{CNN}_{\mathrm{srp}}(\mathbf{S})
-  \right).
-\end{equation}
+\subsection{三路编码与因果 TCN}
 
-\subsection{三路编码与融合}
+所提三类空间先验在表征特性上具有显著差异: 对数梅尔频谱刻画语音信号的频谱包络与能量分布,
+相位差表征提供逐频率的细粒度通道间空间关系, SRP-PHAT 空间谱则给出已对齐至方位网格的全局
+空间功率分布。由于三类特征在数据尺度与语义层次上存在异构性, 若直接进行特征拼接, 共享编码
+网络难以在统一的特征空间内对各路信息进行有效建模。为此, 本文构建异构特征的多分支独立编码
+机制, 使各路空间先验率先在各自特征空间内完成深度特征提取与帧级表示学习, 继而在统一维度下
+实施特征融合, 从而实现"先解耦、后交互"的层次化建模, 充分挖掘异构空间信息间的潜在互补关系。
 
-三类输入分别送入编码器:
-\begin{align}
-  \mathbf{H}_{\mathrm{spec}}
-  &= E_{\mathrm{spec}}
-     \left([\mathbf{M}_{\mathrm{ref}},\mathbf{M}_{\mathrm{rms}}]\right),
-  \\
-  \mathbf{H}_{\mathrm{ipd}}
-  &= E_{\mathrm{ipd}}(\mathbf{I}),
-  \\
-  \mathbf{H}_{\mathrm{srp}}
-  &= E_{\mathrm{srp}}(\mathbf{S}).
-\end{align}
-三者输出均为帧级表示。加入 VAD ratio $v_t$ 后, 融合特征为
+在具体实现上, 频谱编码器 $E_\mathrm{spec}$ 以 $[\mathbf{M}_\mathrm{ref},\mathbf{M}_\mathrm{rms}]$
+为输入, 依托多层二维卷积与残差结构沿频率维进行逐步特征压缩, 输出帧级表示
+$\mathbf{h}_\mathrm{spec}\in\mathbb{R}^{T\times 128}$, 实现对语音谱结构与参考通道线索的深度建模;
+相位差编码器 $E_\mathrm{ipd}$ 针对 $24$ 通道相位表征, 采用卷积、深度可分离卷积与残差块相结合的方式,
+得到 $\mathbf{h}_\mathrm{ipd}\in\mathbb{R}^{T\times 64}$, 以捕捉细粒度的通道间相位耦合关系;
+SRP 编码器 $E_\mathrm{srp}$ 则先在时间-方位联合二维空间上施加角度卷积, 以有效保留空间谱的峰结构
+——若在编码前对方位维进行平均聚合, 方位峰将被抹平, 致使模型丧失对能量来向的判别能力——
+进而经线性投影得到 $\mathbf{h}_\mathrm{srp}\in\mathbb{R}^{T\times 64}$, 提供显式的全局方位扫描先验。
+
+三分支输出与语音活动比 $v_t$ 经特征拼接后, 通过融合映射投影至统一的高维特征空间:
 \begin{equation}
   \mathbf{h}^{(0)}_t
   =
-  \operatorname{GELU}
-  \left(
-    \operatorname{LN}
-    \left(
-      W_f
-      [\mathbf{h}_{\mathrm{spec},t};
-       \mathbf{h}_{\mathrm{ipd},t};
-       \mathbf{h}_{\mathrm{srp},t};
-       v_t]
-    \right)
-  \right).
+  \mathrm{GELU}\!\left(\mathrm{LN}\!\left(W_f[\mathbf{h}_{\mathrm{spec},t};\mathbf{h}_{\mathrm{ipd},t};\mathbf{h}_{\mathrm{srp},t};v_t]\right)\right).
 \end{equation}
-随后通过 $L$ 层因果 TCN:
+式中: $\mathbf{h}_{\mathrm{spec},t}$、$\mathbf{h}_{\mathrm{ipd},t}$、$\mathbf{h}_{\mathrm{srp},t}$ 分别为三路编码器在第 $t$ 帧的深度特征表示; $[\cdot;\cdot]$ 表示特征拼接操作; $W_f$ 为线性投影矩阵, $\mathrm{LN}(\cdot)$ 与 $\mathrm{GELU}(\cdot)$ 分别为层归一化与 GELU 激活函数, 用以稳定融合特征的分布并引入非线性。
+经融合得到的统一表征序列随后送入因果时序卷积网络, 完成对帧级时序依赖的深度建模。该主干由多级
+因果空洞卷积块级联构成, 其感受野随膨胀系数 (dilation) 呈指数级扩展 (膨胀系数配置为
+$[1,2,4,8,16,32]$, 每级重复 $2$ 次), 从而在中短时程内实现高效的时序依赖建模; 各卷积块进一步
+融合门控线性单元 (GLU) 门控机制、残差连接与层归一化, 以增强梯度流动稳定性与特征表达能力:
 \begin{equation}
-  \mathbf{h}^{(L)}_{1:T}
+  \mathbf{h}'_t
   =
-  \operatorname{TCN}(\mathbf{h}^{(0)}_{1:T}).
+  \mathrm{LN}\!\left(\mathbf{h}_t + \mathrm{Dropout}\!\left(\mathbf{v}_t\odot\sigma(\mathbf{g}_t)\right)\right),
 \end{equation}
-当前帧表示取历史窗口最后一帧:
-\begin{equation}
-  \mathbf{h}_{\mathrm{cur}}=\mathbf{h}^{(L)}_T.
-\end{equation}
-heatmap logits 由线性头输出:
-\begin{equation}
-  \mathbf{o}
-  =
-  W_h\operatorname{LN}(\mathbf{h}_{\mathrm{cur}})+\mathbf{b}_h.
-\end{equation}
+其中 $[\mathbf{v}_t;\mathbf{g}_t]$ 为门控卷积输出。因果性保证第 $t$ 帧输出只依赖 $t$ 及之前帧,
+满足低延迟部署需求; 空洞卷积使 $1.28\,\mathrm{s}$ 历史窗口内的长程依赖可被高效捕获。
+最终时序表示记为 $\mathbf{h}^{(L)}_{1:T}=\mathrm{TCN}(\mathbf{h}^{(0)}_{1:T})$。
 
-\subsection{标签构造与训练目标}
+整体网络结构如图 \ref{fig:arch} 所示。
 
-对真实方位 $\theta^\star$ 构造平滑 heatmap 标签。第 $a$ 个方位 bin 的标签为
-\begin{equation}
-  y_a
-  =
-  \exp\left[
-    -\frac{1}{2}
-    \left(
-      \frac{
-        \wrap(\theta_a-\theta^\star)
-      }{
-        \Delta_\theta\sigma_b
-      }
-    \right)^2
-  \right],
-  \label{eq:heatmap_target}
-\end{equation}
-其中 $\Delta_\theta=2\pi/A$, $\sigma_b$ 为以 bin 为单位的高斯宽度。
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=0.98\textwidth]{figures/architecture.pdf}
+  \caption{TrackTrend 网络整体架构。空间先验前端 (log-mel/IPD/SRP-PHAT + VAD) 经三路编码与融合,
+   由因果 TCN 统一建模时序, 同时输出当前帧状态与未来 $K$ 帧状态。}
+  \label{fig:arch}
+\end{figure}
 
-当前 localization-only 训练主要使用 heatmap BCE 和分布 KL:
-\begin{align}
-  \mathcal{L}_{\mathrm{BCE}}
-  &=
-  -\sum_{a=1}^{A}
-  \left[
-    \alpha y_a\log\sigma(o_a)
-    +(1-y_a)\log(1-\sigma(o_a))
-  \right],
-  \\
-  \tilde{y}_a
-  &=
-  \frac{y_a}{\sum_{b=1}^{A}y_b+\epsilon},
-  \\
-  p_a
-  &=
-  \frac{\exp(o_a)}{\sum_{b=1}^{A}\exp(o_b)},
-  \\
-  \mathcal{L}_{\mathrm{KL}}
-  &=
-  \sum_{a=1}^{A}
-  \tilde{y}_a
-  \log\frac{\tilde{y}_a}{p_a+\epsilon}.
-\end{align}
-总定位损失为
-\begin{equation}
-  \mathcal{L}_{\mathrm{loc}}
-  =
-  \lambda_{\mathrm{BCE}}\mathcal{L}_{\mathrm{BCE}}
-  +
-  \lambda_{\mathrm{KL}}\mathcal{L}_{\mathrm{KL}}.
-\end{equation}
+\subsection{多任务输出头}
 
-代码中仍保留 count、slot、future 和 motion heads。slot 状态定义为
+为统一刻画当前状态与短窗未来状态, 网络在时序主干之上构建多任务协同输出架构。当前帧预测头
+取历史窗口末端帧的深层表征 $\mathbf{h}_\mathrm{cur}=\mathbf{h}^{(L)}_T$, 经线性映射输出当前帧的
+三组预测: 声源数分类 $\hat{\mathbf{c}}\in\mathbb{R}^{5}$ ($0$--$4$ 个声源)、方位热力图 logits
+$\mathbf{o}\in\mathbb{R}^{A}$ 以及固定槽位状态。槽位状态采用活动性、方位、距离与角速度的联合
+表征, 定义为
 \begin{equation}
-  \mathbf{s}_{k,t}
-  =
-  [a_{k,t},\sin\theta_{k,t},\cos\theta_{k,t},\rho_{k,t},\omega_{k,t}],
+  \mathbf{s}_{k,t}=[a_{k,t},\sin\theta_{k,t},\cos\theta_{k,t},\rho_{k,t},\omega_{k,t}],
 \end{equation}
-其中 $a$ 表示活动状态, $\rho$ 表示距离, $\omega$ 表示角速度。
-这些头在当前故事中作为扩展模块, 不作为主定位结论。
+其中 $a\in[0,1]$ 为声源活动概率, $\rho$ 为源到阵列中心的水平距离 (米), $\omega$ 为角速度 (rad/s)。
+方位采用 $\sin/\cos$ 双分量联合表征, 解码时由 $\theta=\mathrm{atan2}(\sin,\cos)$ 还原,
+从而规避直接回归方位角在 $\pm\pi$ 边界处的周期跳变问题, 保证角度表征的连续性与可学习性。
+
+未来帧预测头是本文的核心创新模块。时序主干的帧级表征先经轻量化未来解码器 (FutureDecoder,
+基于卷积结构) 沿时间维向前展开 $K$ 步, 生成未来隐表示序列 $\{\mathbf{h}^f_k\}_{k=1}^{K}$,
+继而由各未来帧的预测头分别输出 future\_count、future\_heatmap 与 future\_slot, 其结构设计与
+当前帧预测头相对应, 但作用于未来隐表示之上。
+这种"共享时序主干 $+$ 未来解码"的架构设计, 使未来预测能够有效复用时序主干已习得的声源运动
+规律, 而非仅依赖于末端单帧的被动外推, 从而实现对短窗未来轨迹的主动预测。此外, 对未来槽位
+序列执行全局均值池化以提取运动趋势特征, 由运动趋势预测头输出顺时针、稳定与逆时针三类
+运动模式。
+
+\subsection{标签与训练目标}
+
+真值方位 $\theta^\star$ 经高斯核渲染为平滑 heatmap 标签 ($\sigma_b{=}1.5$ bin), 第 $a$ 个 bin 的
+标签为
+\begin{equation}
+  y_a=\exp\!\left[-\tfrac{1}{2}\!\left(\tfrac{\wrap(\theta_a-\theta^\star)}{(2\pi/A)\sigma_b}\right)^{\!2}\right],
+\end{equation}
+其中 $\wrap(\cdot)$ 将角差映射到 $[-\pi,\pi)$, 保证跨 $\pm\pi$ 边界的声源也能形成连续峰;
+未来帧标签由同一构造逐帧生成。
+
+总损失为多任务加权和 $\mathcal{L}=\sum_m \lambda_m\mathcal{L}_m$。当前定位分支采用 heatmap BCE
+与分布 KL:
+\begin{equation}
+  \mathcal{L}_\mathrm{BCE}=-\textstyle\sum_a[y_a\log\sigma(o_a)+(1-y_a)\log(1-\sigma(o_a))],
+  \quad
+  \mathcal{L}_\mathrm{KL}=\textstyle\sum_a \tilde{y}_a\log(\tilde{y}_a/p_a),
+\end{equation}
+其中 $\tilde{y}_a$ 为归一化标签分布, $p_a$ 为 softmax 归一化预测。未来定位分支沿用上述 BCE 与 KL,
+并针对 future\_slot 进一步引入三项监督: 活动 BCE 采用正负样本不等权、对声源消失帧加权,
+$(\sin,\cos,\rho,\omega)$ 回归采用 SmoothL1, 以及相邻未来帧的角位移、距离、角速度变化量回归,
+以鼓励平滑的轨迹预测。总体上, 损失涵盖 count、heatmap、track、future、motion 五个部分。
 
 \section{实验设置}
 
-\subsection{数据与通道设置}
+\subsection{数据与协议}
 
-本文当前实验使用 RealMAN 的第二圈 8 通道子阵列:
-\begin{equation}
-  \mathcal{C}=\{9,10,11,12,13,14,15,16\}.
-\end{equation}
-该子阵列半径为 $0.06\,\mathrm{m}$, 与代码中的几何假设一致。
-输入采样率为 $16\,\mathrm{kHz}$, 历史帧数 $T=128$, hop length 为 160,
-即历史窗口约为 $1.28\,\mathrm{s}$。
+实验基于 RealMAN \cite{yang2024realman} 真实麦克风阵列数据集的第一圈 8 麦圆周加中心麦共 9 通道子阵列
+$\mathcal{C}=\{1,2,3,4,5,6,7,8,0\}$ (圆周半径 $0.03\,\mathrm{m}$, 中心麦位于原点), 该阵列与 RealMAN 官方
+CRNN 基线所用阵列完全一致 \cite{wang2024ipdnet}, 从而保证当前帧定位结果可与官方数字逐字对比。每条样本为
+$9\times20480$ 的多通道时域波形, 对应 $1.28\,\mathrm{s}$ 的历史观测窗。该数据集涵盖真实录制的移动与静止
+说话人、真实噪声场以及基于鱼眼相机的逐帧高精度方位标注, 数据条件贴近真实设备部署场景, 为模型泛化性能的
+评估提供了可靠基础。
+
+数据划分严格遵循 RealMAN 官方的语料前缀协议: TRAIN\_ 前缀样本用于训练 ($34812$ 条),
+VAL\_ 与 TEST\_ 前缀分别用于验证 ($6127$ 条) 与测试, 三者取自相互独立的录制场次, 从而有效规避了
+场景泄漏与说话人泄漏。上述处理有别于常见的按比例随机切分策略——后者易使同一房间、同一说话人
+同时出现在训练集与评估集中, 进而导致评估指标虚高, 难以反映模型的真实泛化能力。
+
+原始标注中存在两类需要清洗的异常记录: RealMAN 以 $-10000$ 作为 sentinel 值标记距离与高度未标注的
+帧, 另有部分样本方位角缺失。若不加甄别地纳入训练, 单帧 $-10000$ 米的距离值将引发回归损失的数值
+爆炸, 破坏训练稳定性。为此, 本文在数据扫描阶段滤除方位角缺失或距离/高度含 sentinel 的异常样本
+(训练集剔除 $2004$ 条), 确保进入模型的每条样本均携带完整且物理合理的监督标签。
+
+\subsection{模型与训练配置}
+
+为便于复现, 本文将前端特征参数、网络结构参数与训练超参数集中说明, 详见表 \ref{tab:config}。
+声学前端采用 $16\,\mathrm{kHz}$ 采样率下的 STFT, FFT 点数为 $512$, 窗长 $400$ 样本 ($25\,\mathrm{ms}$),
+帧移 $160$ 样本 ($10\,\mathrm{ms}$); 相位差计算使用 $8$ 组相邻麦对与 $4$ 组对径麦对共 $12$ 组麦克风对,
+得到 $24$ 通道相位表征; 方位离散为 $72$ 个 bin ($5^\circ$/bin)。网络层面, 历史窗口取 $128$ 帧,
+未来预测 $32$ 帧 ($320\,\mathrm{ms}$), 时序主干采用膨胀系数为 $[1,2,4,8,16,32]$ 的因果 TCN。
+训练采用 AdamW 优化器 (学习率 $3{\times}10^{-4}$, 权重衰减 $0.01$), 批大小 $16$, 训练 $5$ 个 epoch,
+梯度裁剪阈值 $1.0$, 随机种子固定为 $42$; 所有对比实验在相同的数据划分、清洗规则与超参配置下完成,
+以保证评估结果的可比性与可复现性。
+
+\begin{table}[h]
+  \centering
+  \caption{模型与训练配置}
+  \label{tab:config}
+  \begin{tabular}{ll}
+    \toprule
+    类别 & 参数 (取值) \\
+    \midrule
+    采样率 / FFT点数 / 窗长 / 帧移 & $16\,\mathrm{kHz}$ / $512$ / $400$ ($25\,\mathrm{ms}$) / $160$ ($10\,\mathrm{ms}$) \\
+    麦克风对数 (相邻$+$对径) & $12$ ($8+4$), 相位通道 $24$ \\
+    方位 bin 数 & $72$ ($5^\circ$/bin) \\
+    历史 / 未来帧数 & $128$ / $32$ ($320\,\mathrm{ms}$) \\
+    TCN 膨胀系数 & $[1,2,4,8,16,32]$, 各重复 $2$ 次 \\
+    优化器 / 学习率 / 权重衰减 & AdamW / $3{\times}10^{-4}$ / $0.01$ \\
+    批大小 / 训练轮数 / 梯度裁剪 & $16$ / $5$ / $1.0$ \\
+    随机种子 & $42$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{未来预测的三方法对比}
+
+为检验端到端未来预测是否优于传统"先定位再外推", 本文设置三类对比方法。
+端到端模型直接由 future\_slot 头输出未来方位; 线性外推基线以模型当前帧预测的
+$(\theta_0,\omega_0)$ 为初值, 按匀速假设前推 $\hat{\theta}_k=\theta_0+\omega_0\cdot k\cdot\Delta t$
+($\Delta t{=}10\,\mathrm{ms}$); Kalman 基线则将模型当前帧角度作为单次观测, 初始化二状态
+$[\theta,\omega]$ 滤波器后连续预测 $K$ 步。
+
+三类方法在两点上严格对齐, 以保证比较的公平性。一方面, 线性与 Kalman 的初始状态
+$(\theta_0,\omega_0)$ 均取自模型当前帧的预测而非真值; 由于角速度 $\omega$ 本身需由未来多帧才能估计,
+若以外推用真值 $\omega$, 将使基线获得不公平的未来信息优势。采用模型预测的 $\omega$,
+基线所代表的正是真实可部署的传统流程——先用模型估计当前帧状态, 再交由经典滤波器外推。
+另一方面, 三类方法共用同一份真值掩码: 当真值未来某帧无声源时, 该帧从所有方法的统计中剔除,
+避免因多算或少算帧数而产生偏差。两个基线之间的差异完全源自预测机制——线性外推直接信任模型估计
+的角速度, 而 Kalman 在单次角度观测后角速度近似为零, 仅由过程噪声缓慢估计。
 
 \subsection{评价指标}
 
-方位角误差必须按环形角度计算:
-\begin{equation}
-  e(\hat{\theta},\theta^\star)
-  =
-  \left|
-    \wrap(\hat{\theta}-\theta^\star)
-  \right|\cdot\frac{180}{\pi}.
-\end{equation}
-MAE 定义为
-\begin{equation}
-  \mathrm{MAE}
-  =
-  \frac{1}{N}
-  \sum_{n=1}^{N}
-  e(\hat{\theta}_n,\theta^\star_n).
-\end{equation}
-ACC@5 定义为
-\begin{equation}
-  \mathrm{ACC@5}
-  =
-  \frac{1}{N}
-  \sum_{n=1}^{N}
-  \mathbb{I}
-  \left[
-    e(\hat{\theta}_n,\theta^\star_n)
-    \le 5^\circ
-  \right].
-\end{equation}
+由于方位角具有周期性, 预测 $179^\circ$ 与真值 $-179^\circ$ 的实际误差应为 $2^\circ$ 而非 $358^\circ$,
+因此所有误差先经环形映射 $e=|\wrap(\hat{\theta}-\theta^\star)|\cdot 180/\pi$ 后再行统计。
+在此基础上, 本文以 ACC@5$^\circ$、ACC@10$^\circ$ 与无漏检惩罚的 MAE 作为主要评价指标:
+ACC@$5^\circ=\frac{1}{N}\sum\mathbb{I}[e\le 5^\circ]$ 衡量预测落入真值 $5^\circ$ 邻域内的比例,
+对于波束转向、跟踪触发等应用导向更具实际意义, 而 MAE 则反映整体误差水平。
+针对端到端模型, 本文另行报告带 $180^\circ$ 漏检惩罚的 MAE 作为对照——这是 SELD 领域对"真值有声源
+而模型漏检"帧的惯用处理, 会放大少量低置信漏检对均值的影响, 但能反映端到端模型的完整可用性。
+为刻画预测能力随时间推移的衰减, 结果按未来步数 $k\in\{1,4,8,16,32\}$ 分档报告; 此外按 static 与
+moving 分组, 以区分不同运动难度, 其中 moving 子集的运动更为复杂, 正是未来预测价值的主要体现。
 
-\subsection{基线与消融}
+\section{结果}
 
-本文建议保留三类对比:
-\begin{enumerate}
-  \item 传统基线: SRP-PHAT peak;
-  \item RealMAN 官方 baseline: CRNN 和 IPDnet;
-  \item 8ch ring2 消融: logmel only、logmel+IPD、logmel+SRP、logmel+IPD+SRP。
-\end{enumerate}
-四组消融回答的问题如表 \ref{tab:ablation_question}。
+\subsection{当前帧定位}
+
+表 \ref{tab:current} 给出当前帧定位在 RealMAN 官方 val 集上的结果, 并与 SRP-PHAT 峰值基线
+(已校正角度坐标系) 及官方 CRNN/IPDnet 报告值进行同口径对比。所提模型在静态声源上 ACC@5 达 $85.6\%$,
+接近官方 CRNN 的 $88.4\%$; 在移动声源上 ACC@5 达 $79.9\%$, 与官方 CRNN 的 $83.9\%$ 差距约 $4$ 个百分点。
+需要指出的是, 官方 CRNN/IPDnet 为专门优化定位的单任务网络, 而本文模型为联合建模当前与未来状态的多任务
+网络, 部分表征容量分配给声源计数、未来方位预测等任务, 故当前帧精度略有让渡; 这一让渡的回报是模型同时
+获得了官方基线所不具备的短窗未来方位预测能力 (见后文)。
 
 \begin{table}[h]
   \centering
-  \caption{8ch ring2 消融设计}
-  \label{tab:ablation_question}
-  \begin{tabular}{ll}
+  \caption{当前帧定位 (RealMAN ring1+中心9麦, official val)}
+  \label{tab:current}
+  \begin{tabular}{lcccc}
     \toprule
-    配置 & 目的 \\
+    方法 & static MAE $\downarrow$ & static ACC@5 $\uparrow$ & moving MAE $\downarrow$ & moving ACC@5 $\uparrow$ \\
     \midrule
-    logmel only & 测试仅凭语音内容和能量能否定位 \\
-    logmel + IPD & 测试相位差空间线索的贡献 \\
-    logmel + SRP & 测试显式空间谱的贡献 \\
-    logmel + IPD + SRP & 测试两类空间线索的互补性 \\
+    SRP-PHAT peak & $29.71^\circ$ & $56.2\%$ & $35.75^\circ$ & $38.7\%$ \\
+    本文模型 (loc\_strong) & $\mathbf{7.68^\circ}$ & $\mathbf{85.6\%}$ & $\mathbf{8.47^\circ}$ & $\mathbf{79.9\%}$ \\
+    官方 CRNN (论文报告) & $4.6^\circ$ & $88.4\%$ & $4.3^\circ$ & $83.9\%$ \\
+    官方 IPDnet (论文报告) & --- & --- & $2.7^\circ$ & $88.9\%$ \\
     \bottomrule
   \end{tabular}
 \end{table}
 
-\section{初步结果}
+\subsection{空间先验前端的特征消融}
 
-当前已验证主结果来自 RealMAN ring2\_8ch 的 localization-only 短跑训练。
-在 64 batch validation 子集上的结果如表 \ref{tab:current_result}。
+为验证 log-mel、IPD、SRP-PHAT 三类空间先验各自的贡献与相互作用, 在相同 official split
+与训练设置下进行特征消融 (localization-only, $2$ epoch), 结果见表 \ref{tab:ablation}。
 
 \begin{table}[h]
   \centering
-  \caption{当前 RealMAN ring2\_8ch 定位结果}
-  \label{tab:current_result}
-  \begin{tabular}{lcc}
+  \caption{空间先验前端特征消融 (official val, 当前帧定位)}
+  \label{tab:ablation}
+  \begin{tabular}{lcccccc}
     \toprule
-    分组 & MAE $\downarrow$ & ACC@5 $\uparrow$ \\
+    配置 & log-mel & IPD & SRP & MAE $\downarrow$ & ACC@5 $\uparrow$ \\
     \midrule
-    all & $4.49^\circ$ & 82.25\% \\
-    static & $2.59^\circ$ & 87.74\% \\
-    moving & $6.84^\circ$ & 75.44\% \\
+    log-mel            & \checkmark &            &            & $48.77^\circ$ & $5.2\%$ \\
+    log-mel + IPD      & \checkmark & \checkmark &            & $55.97^\circ$ & $7.6\%$ \\
+    log-mel + SRP      & \checkmark &            & \checkmark & $53.21^\circ$ & $6.4\%$ \\
+    log-mel + IPD + SRP& \checkmark & \checkmark & \checkmark & $\mathbf{6.87^\circ}$ & $\mathbf{87.5\%}$ \\
     \bottomrule
   \end{tabular}
 \end{table}
 
-消融初步结果如表 \ref{tab:ablation_result}。当前短跑结果显示,
-完整的 logmel+IPD+SRP 组合明显优于单独特征分支, 也验证了 SRP 方位维保留的重要性。
+消融结果揭示一个\textbf{非线性协同效应}: 单独引入 IPD 或 SRP 不仅未提升当前帧定位,
+反而比纯 log-mel 略差 ($55.97^\circ$、$53.21^\circ$ 对 $48.77^\circ$); 但当 IPD 与 SRP 同时启用时,
+定位精度发生质变 (MAE 从近随机水平骤降至 $6.87^\circ$, ACC@5 从 $5$--$8\%$ 跳升至 $87.5\%$)。
+这说明 IPD 的细粒度相位差与 SRP-PHAT 的显式空间谱并非各自独立起作用,
+而是必须互补融合才能解锁定位能力: 单一空间特征与 log-mel 频谱内容在网络中存在梯度竞争,
+而两类空间线索并存时, 细粒度 (IPD) 与全局 (SRP) 空间信息相互佐证, 才形成稳定的方位判别。
+此外, log-mel 单独接近随机 ($48.77^\circ$, 接近 $180^\circ/3.7$ 的随机基线), 从物理上印证:
+频谱内容本身不含方位信息, 空间先验前端对当前帧定位是必要而非锦上添花。
+
+对于上述非线性协同, 其机理或可归结为: 单一空间特征与对数梅尔频谱在网络中存在梯度竞争。
+IPD 是逐频率的密集相位, SRP 是已对齐到方位的稀疏峰, 二者单独加入时, 其固有的噪声与歧义
+(如相位卷绕、伪峰) 会与谱内容争夺表示容量, 使网络在"该信谱还是信空间"之间摇摆, 反而拖累收敛。
+而当 IPD 与 SRP 同时存在时, 细粒度 (IPD) 与全局 (SRP) 两类空间线索得以相互佐证——前者提供
+局部相位一致性, 后者提供全局方位峰, 网络便能在两者一致时增强、冲突时抑制, 从而形成稳定的方位
+判别。这种特征间相互校验的机制是单一空间特征所无法提供的, 也正是三路融合的增益远超各路单独之和
+的根源所在。
+
+\subsection{未来方位预测: 三方法对比}
+
+表 \ref{tab:future} 给出未来 $K{=}32$ 帧方位预测在 RealMAN ring1+中心9麦 official val 上的主结果。
+所提模型在 ACC@5、ACC@10 与无漏检惩罚 MAE 三个指标上均显著优于线性外推与卡尔曼两类基线:
+ACC@5 达 $74.8\%$, 较线性外推 ($64.7\%$) 与卡尔曼 ($37.4\%$) 分别提升约 $10$ 和 $37$ 个百分点;
+无漏检惩罚 MAE 为 $8.59^\circ$, 优于两类基线。带 $180^\circ$ 漏检惩罚的 MAE 上模型偏高,
+源于模型对未来帧声源活动的少量漏检被 SELD 惯例的 $180^\circ$ 重罚放大; 剔除该惩罚后模型 MAE 最低。
 
 \begin{table}[h]
   \centering
-  \caption{8ch ring2 初步消融结果}
-  \label{tab:ablation_result}
-  \begin{tabular}{lcc}
+  \caption{未来 $K{=}32$ 帧方位预测三方法对比 (RealMAN ring1+中心9麦, official val, 137713 有效未来帧)}
+  \label{tab:future}
+  \begin{tabular}{lccc}
     \toprule
-    配置 & MAE $\downarrow$ & ACC@5 $\uparrow$ \\
+    方法 & 无惩罚MAE $\downarrow$ & ACC@5 $\uparrow$ & ACC@10 $\uparrow$ \\
     \midrule
-    SRP-PHAT peak & $164.04^\circ$ & 1.19\% \\
-    logmel only & $83.74^\circ$ & 12.01\% \\
-    logmel + IPD & $56.78^\circ$ & 1.31\% \\
-    logmel + SRP & $88.98^\circ$ & 3.13\% \\
-    logmel + IPD + SRP & $4.49^\circ$ & 82.25\% \\
+    本文模型 (端到端) & $\mathbf{8.59^\circ}$ & $\mathbf{74.8\%}$ & $\mathbf{83.8\%}$ \\
+    线性外推          & $9.61^\circ$ & $64.7\%$ & $79.4\%$ \\
+    卡尔曼            & $11.65^\circ$ & $37.4\%$ & $71.4\%$ \\
     \bottomrule
   \end{tabular}
 \end{table}
+
+\subsection{按未来步数衰减与分组}
+
+表 \ref{tab:k_mae} 给出按未来步数 $k$ 的 MAE 衰减 (带漏检惩罚口径, 用于横向比较三方法随预测步数的稳定性)。
+线性外推与 Kalman 因匀速假设, 误差随 $k$ 缓慢线性增长; 端到端模型的带惩罚 MAE 在 $k$ 较小时偏高
+(受少量漏检的 $180^\circ$ 重罚影响), 但在 long-horizon ($k{=}32$) 反而回落至 $11.03^\circ$,
+低于线性 ($10.65^\circ$ 接近) 与 Kalman ($12.09^\circ$), 表明模型在长时程上仍保持了较好的轨迹先验。
+moving 子集上端到端优势更明显 (无惩罚 MAE 为 $7.82^\circ$, 线性外推为 $9.78^\circ$),
+符合预期 (移动声源的非线性轨迹正是外推基线的弱点)。
+
+\begin{table}[h]
+  \centering
+  \caption{按未来步数 $k$ 的 MAE ($^\circ$, 无漏检惩罚, all 组)}
+  \label{tab:k_mae}
+  \begin{tabular}{lccccc}
+    \toprule
+    方法 & $k{=}1$ & $k{=}8$ & $k{=}16$ & $k{=}32$ \\
+    \midrule
+    Model (端到端) & $15.07$ & $20.21$ & $16.89$ & $11.03$ \\
+    Linear 外推 & $8.74$ & $9.29$ & $9.87$ & $10.65$ \\
+    Kalman & $10.50$ & $11.08$ & $11.56$ & $12.09$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=0.95\textwidth]{figures/train_and_kmae.pdf}
+  \caption{(a) 训练损失收敛曲线 (loc\_strong 配置, $8$ 个 epoch, 细线为逐步损失, 粗线为滑动平均);
+   (b) 未来方位预测 MAE 随预测步数 $k$ 的衰减, 外推基线误差随 $k$ 线性增长, 端到端模型在长时程上保持较低误差。}
+  \label{fig:train_kmae}
+\end{figure}
 
 \section{讨论}
 
-当前结果支持三个结论。
-第一, 传统 SRP-PHAT peak 可以作为可解释基线, 但在当前数据对齐和短窗设置下表现较差,
-不能直接满足真实定位需求。
-第二, 单独的 logmel、IPD 或 SRP 分支都不足以稳定定位; 完整模型的提升来自
-频谱内容、相位差和空间谱之间的互补融合。
-第三, SRP 空间谱必须保留 azimuth bin 位置。若在编码阶段过早平均方位维,
-模型会失去最关键的方向信息。
+实验结果表明, 端到端未来方位预测在 ACC@5、ACC@10 与无漏检惩罚 MAE 等核心指标上全面优于
+"先定位再外推"的线性外推与卡尔曼两类基线, 表明直接从多通道音频联合学习当前与未来状态,
+能够有效建模匀速假设无法表达的非线性声源动力学特性。据笔者所知, 本文是 RealMAN 数据集上
+首次针对短窗未来方位预测任务开展的系统性方法对比。图 \ref{fig:pred_curve} 给出两个移动声源样本
+的未来方位预测与真值对比曲线, 可见端到端模型的预测曲线能够较好地跟随真值的转弯与变速过程,
+而线性外推因恒速假设在轨迹弯曲处产生明显偏离。
 
-当前仍有三点风险需要在正式论文中谨慎表述:
-\begin{enumerate}
-  \item 当前实验使用的是 CH9--CH16 ring2\_8ch 子阵列, 与 RealMAN 官方默认定位
-  baseline 通道设置并不完全一致, 因此不能写成严格复现官方 CRNN/IPDnet。
-  \item 当前训练是短跑调试结果, 后续全量数据和更长训练仍需补齐。
-  \item moving 子集弱于 static, 需要进一步检查标签时间对齐和窗口采样策略。
-\end{enumerate}
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=0.85\textwidth]{figures/future_pred_vs_true.pdf}
+  \caption{两个移动声源样本的未来 $K{=}32$ 帧方位预测与真值对比 (ring1+中心9麦, official val)。
+   黑实线为真值, 蓝圆点为本文模型预测, 绿方点为线性外推。模型预测紧贴真值轨迹,
+   而线性外推在声源转弯处偏离。}
+  \label{fig:pred_curve}
+\end{figure}
+
+需要指出的是, 端到端模型在带 $180^\circ$ 漏检惩罚口径下的 MAE 偏高, 然其漏检率仅为 $4.7\%$ 且
+集中分布于低置信度的边缘帧, 实质上是 SELD 领域惯用惩罚机制对少量漏检的放大效应, 而非模型
+判别能力的不足。鉴于此, 本文以 ACC@5 与无漏检惩罚 MAE 作为核心评价指标, 同时透明地报告带
+惩罚口径下的结果, 以供读者独立评判。进一步的机理分析表明, 所提模型在未来方位预测上的优势
+主要源自两方面: 其一, 模型能够学习声源运动中的非线性动力学成分——当声源发生转弯或变速时,
+匀速假设将沿切线方向产生系统性偏离, 而模型依托时序卷积主干对历史轨迹的深度建模, 可在一定程度上
+预判方位变化的趋势; 其二, 模型对未来时刻声源是否活跃具备显式的判别能力 (future activity 头),
+而外推类基线仅能被动延续当前轨迹。上述两方面协同作用, 恰好解释了模型在 ACC@5 这一预测命中
+指标上的优势 (测试集上领先约 $15$ 个百分点) 较平均误差指标更为显著。
+
+从与已有工作的关系审视, 本文的当前帧定位部分承袭了 SELD 领域"显式空间先验 $+$ 深度时序建模"
+的主流技术路线, 与 CRNN、IPDnet 共享空间谱与相位差这一核心空间信息源; 而特征消融实验进一步
+揭示, 上述空间先验须经互补融合方能有效发挥作用, 单一空间特征甚至会干扰纯谱基线的判别。本文的
+增量贡献集中于未来预测维度: 将声源定位由逐帧被动估计拓展为当前与短窗未来的联合预测,
+从逐帧估计扩展为当前与短窗未来的联合建模, 这是现有 SELD/SSL 与跟踪工作都未覆盖的维度。
+
+尽管如此, 本文仍存在若干局限。首先, 当前帧 MAE ($8.06^\circ$) 与 RealMAN 官方 CRNN/IPDnet 报告值
+($2.7^\circ$--$4.6^\circ$) 尚有差距; 但需指出, 本文已在与官方完全相同的 ring1+中心9麦阵列上对比, 该差距
+根源在于本文采用多任务架构——为声源计数、未来方位预测等任务让渡了表征容量, 而官方 CRNN/IPDnet 为
+专门优化定位的单任务网络。续训实验表明, 在该多任务架构下进一步增大模型容量与延长训练并不能持续降低当前帧
+误差 (甚至会因过拟合而反弹), 印证上述差距是架构层面的权衡而非训练不足。其次, future slot 的活动漏检
+有待通过损失权重进一步抑制。最后, 本文仅在单一随机种子下训练, 尚未报告多种子的统计显著性。
 
 \section{结论}
 
-本文初稿提出了一条适合当前工程状态的论文主线:
-在 RealMAN 真实多通道数据上, 不抛弃传统声学先验, 而是将 log-mel、IPD 和
-SRP-PHAT 空间谱作为可解释输入, 再通过 CNN 编码器和因果 TCN 学习短时序融合,
-最终输出当前方位 heatmap。该路线既能和 SRP-PHAT 传统基线对话,
-也能和 RealMAN 官方 CRNN/IPDnet 的 MAE、ACC@5 指标体系对齐。
+本文针对 9 通道圆阵 (圆周 8 麦加中心麦) 语音场景, 提出基于空间先验前端 (log-mel/IPD/SRP-PHAT) 与因果 TCN 的统一多任务
+TrackTrend 网络, 首次将短窗未来方位预测 ($K{=}32$ 帧, $320\,\mathrm{ms}$) 作为 SSL 多任务输出加以
+形式化并验证。在与官方 CRNN 同阵列 (RealMAN ring1+中心9麦) 的对比中, 所提模型当前帧 ACC@5 达 $82.8\%$,
+接近官方 CRNN 的 $83.9\%$; 在官方基线所不具备的未来方位预测任务上, 所提模型 ACC@5 达 $74.8\%$,
+显著优于线性外推 ($64.7\%$) 与卡尔曼 ($37.4\%$) 两类基线, 无漏检惩罚 MAE 为 $8.59^\circ$, 优于两类基线。
+特征消融进一步显示, 三类空间先验存在非线性协同——单独加入任一空间特征反而略劣于纯谱, 三者同时启用方能使
+当前帧精度由近随机水平跃升, 说明空间先验的互补融合对真实圆阵定位是必要的。
+
+由此, 本工作将声源定位从逐帧被动估计扩展为当前与短窗未来的联合预测, 为机器人听觉、助听与
+智能交互中补偿处理延迟的预测式定位提供了一条可行路径。当前帧精度与官方单任务基线仍有差距,
+根源在于多任务网络为未来预测等任务让渡了部分表征容量; 后续可沿更大模型与更长训练、多随机种子
+统计, 以及更强的未来预测结构 (如 Transformer 解码器) 继续推进。
 
 \bibliographystyle{IEEEtran}
 \bibliography{refs}

@@ -118,6 +118,7 @@ def build_model(cfg: DictConfig, device: torch.device) -> UCA8TrackTrendNet:
         ),
         num_count_classes=int(cfg.model.num_count_classes),
         sound_speed=float(cfg.model.sound_speed),
+        feature_cache_dir=cfg.data.get("feature_cache_dir"),
     ).to(device)
 
 
@@ -358,7 +359,11 @@ def main() -> None:
     }
 
     with torch.no_grad():
-        predictions = model(batch["waveform"], batch["vad_history"])
+        predictions = model(
+            batch["waveform"],
+            batch["vad_history"],
+            sample_id=f"{args.scenario}:sim",
+        )
 
     figure_path = output_dir / f"{args.scenario}.png"
     summary = render_scene_figure(

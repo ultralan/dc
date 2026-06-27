@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
+import hashlib
+import json
+from pathlib import Path
 
 import torch
 import torch.nn.functional as F
@@ -8,12 +12,12 @@ from torch import nn
 
 from uca8.features.ipd import compute_ipd_features
 from uca8.features.srp_phat import SRPPHAT
-from uca8.geometry.uca8 import azimuth_grid, default_mic_pairs
+from uca8.geometry.uca8 import azimuth_grid, infer_mic_pairs
 
 
 @dataclass(slots=True)
 class STFTSpec:
-    """STFT/frontend 共享参数, 用来保证各特征分支的时间维对齐."""
+    """STFT/frontend shared parameters."""
 
     sample_rate: int = 16000
     n_fft: int = 512
@@ -25,13 +29,11 @@ class STFTSpec:
     target_frames: int = 128
 
 
-class MultiChannelSTFT(nn.Module):
-    """计算多通道波形的复数 STFT.
+FEATURE_CACHE_VERSION = 1
 
-    输入形状为 ``[B, C, samples]``, 输出形状为 ``[B, C, frames, freq_bins]``.
-    时间维放在频率维前面, 后续 log-mel/IPD/SRP 分支都沿用
-    ``[B, channels, T, bins]`` 这个布局.
-    """
+
+class MultiChannelSTFT(nn.Module):
+    """Compute multi-channel complex STFT."""
 
     def __init__(
         self,
@@ -39,7 +41,6 @@ class MultiChannelSTFT(nn.Module):
         win_length: int = 400,
         hop_length: int = 160,
     ) -> None:
-        """初始化 STFT 参数和 Hann 窗."""
         super().__init__()
         self.n_fft = n_fft
         self.win_length = win_length
@@ -47,7 +48,6 @@ class MultiChannelSTFT(nn.Module):
         self.register_buffer("window", torch.hann_window(win_length), persistent=False)
 
     def forward(self, waveform: torch.Tensor) -> torch.Tensor:
-        """执行多通道 STFT."""
         if waveform.ndim != 3:
             raise ValueError("Expected waveform shape [batch, channels, samples].")
         batch, channels, samples = waveform.shape
@@ -74,11 +74,7 @@ def build_mel_filterbank(
     f_min: float = 0.0,
     f_max: float | None = None,
 ) -> torch.Tensor:
-    """构造轻量 mel 滤波器组, 避免额外依赖 torchaudio.
-
-    这里需要的是稳定可复现的 log-mel-like 特征, 不是完整音频库能力.
-    自己构造 ``freq -> mel`` 矩阵可以减少环境差异.
-    """
+    """Build a stable mel-like projection without torchaudio."""
     upper_hz = float(sample_rate) / 2.0 if f_max is None else f_max
     fft_freqs = torch.linspace(0.0, upper_hz, steps=num_freqs, device=device, dtype=dtype)
     mel_min = 2595.0 * torch.log10(torch.tensor(1.0 + f_min / 700.0, device=device, dtype=dtype))
@@ -97,10 +93,7 @@ def build_mel_filterbank(
 
 
 def fit_time_dim(x: torch.Tensor, target_frames: int) -> torch.Tensor:
-    """把特征张量裁剪/左侧补零到模型历史窗口长度.
-
-    如果帧数过长, 保留最后 ``target_frames`` 帧, 因为当前定位标签对应历史窗口末端.
-    """
+    """Trim or left-pad a tensor so the time axis matches the model window."""
     current_frames = x.shape[-2]
     if current_frames == target_frames:
         return x
@@ -117,13 +110,7 @@ def build_logmel_like_features(
     out_bins: int = 64,
     eps: float = 1e-6,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """返回参考麦克风和多通道平均能量的 log-mel 特征.
-
-    ``logmel_ref`` 保留第一个麦克风的频谱视角.
-    ``logmel_rms`` 先对所有麦克风功率做平均, 再投影到 mel 频带,
-    表示一个紧凑的多通道能量摘要. 二者都是从原始波形派生出的输入特征,
-    不是标签.
-    """
+    """Return reference-mic and multi-channel RMS log-mel features."""
     power = stft_complex.abs().pow(2.0)
     mel_filterbank = mel_filterbank.to(device=power.device, dtype=power.dtype)
     ref = torch.einsum("bctf,fm->bctm", power[:, :1], mel_filterbank)
@@ -132,19 +119,7 @@ def build_logmel_like_features(
 
 
 class UCAFeatureFrontend(nn.Module):
-    """UCA/RealMAN 模型的特征前端.
-
-    这个模块集中负责所有信号处理特征提取. 模型输入原始波形, frontend 输出固定 key:
-
-    - ``logmel_ref``: 参考麦克风 log-mel, ``[B, 1, T, mel_bins]``.
-    - ``logmel_rms``: 多通道平均功率 log-mel, ``[B, 1, T, mel_bins]``.
-    - ``ipd_feat``: 麦克风对 IPD 特征, ``[B, pair_features, T, ipd_bins]``.
-    - ``srp_map``: SRP-PHAT 空间谱, ``[B, 1, T, azimuth_bins]``.
-    - ``vad_ratio``: 帧级活动提示, ``[B, T, 1]``.
-
-    消融开关会在特征构造后把某个分支置零, 而不是删除分支.
-    这样下游网络结构不变, 实验比较的是信息来源, 不是参数规模.
-    """
+    """Feature frontend for the 8-mic UCA localization model."""
 
     def __init__(
         self,
@@ -164,12 +139,8 @@ class UCAFeatureFrontend(nn.Module):
         use_ipd: bool = True,
         use_srp: bool = True,
         use_vad: bool = True,
+        feature_cache_dir: str | Path | None = None,
     ) -> None:
-        """初始化特征前端.
-
-        mic_positions 决定 SRP-PHAT 的 steering delays;
-        use_* 开关用于 ablation, 不改变输出字典的 key 和 shape.
-        """
         super().__init__()
         self.spec = STFTSpec(
             sample_rate=sample_rate,
@@ -186,6 +157,7 @@ class UCAFeatureFrontend(nn.Module):
         self.use_ipd = use_ipd
         self.use_srp = use_srp
         self.use_vad = use_vad
+        self.feature_cache_dir = Path(feature_cache_dir) if feature_cache_dir is not None else None
         self.stft = MultiChannelSTFT(n_fft=n_fft, win_length=win_length, hop_length=hop_length)
         self.register_buffer(
             "mel_filterbank",
@@ -198,7 +170,8 @@ class UCAFeatureFrontend(nn.Module):
             ),
             persistent=False,
         )
-        self.mic_pairs = default_mic_pairs(int(mic_positions.shape[0]))
+        self._cache_signature = self._build_cache_signature(mic_positions)
+        self.mic_pairs = infer_mic_pairs(mic_positions)
         self.srp = SRPPHAT(
             sample_rate=sample_rate,
             n_fft=n_fft,
@@ -212,12 +185,71 @@ class UCAFeatureFrontend(nn.Module):
             sound_speed=sound_speed,
         )
 
-    def forward(
+    def _build_cache_signature(self, mic_positions: torch.Tensor) -> str:
+        payload = {
+            "version": FEATURE_CACHE_VERSION,
+            "spec": {
+                "sample_rate": self.spec.sample_rate,
+                "n_fft": self.spec.n_fft,
+                "win_length": self.spec.win_length,
+                "hop_length": self.spec.hop_length,
+                "spec_bins": self.spec.spec_bins,
+                "ipd_bins": self.spec.ipd_bins,
+                "azimuth_bins": self.spec.azimuth_bins,
+                "target_frames": self.spec.target_frames,
+            },
+            "flags": {
+                "use_logmel_ref": self.use_logmel_ref,
+                "use_logmel_rms": self.use_logmel_rms,
+                "use_ipd": self.use_ipd,
+                "use_srp": self.use_srp,
+                "use_vad": self.use_vad,
+            },
+            "geometry": mic_positions.detach().cpu().tolist(),
+        }
+        return hashlib.sha1(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+
+    def _cache_path(self, sample_id: str) -> Path | None:
+        if self.feature_cache_dir is None:
+            return None
+        digest = hashlib.sha1(
+            f"{FEATURE_CACHE_VERSION}:{self._cache_signature}:{sample_id}".encode("utf-8")
+        ).hexdigest()
+        return self.feature_cache_dir / f"{digest}.pt"
+
+    @staticmethod
+    def _normalize_sample_ids(
+        sample_id: str | Sequence[str] | None,
+        batch_size: int,
+    ) -> list[str] | None:
+        if sample_id is None:
+            return None
+        if isinstance(sample_id, str):
+            return [sample_id] * batch_size
+        sample_ids = [str(item) for item in sample_id]
+        if len(sample_ids) != batch_size:
+            raise ValueError("sample_id length must match batch size.")
+        return sample_ids
+
+    @staticmethod
+    def _merge_feature_chunks(items: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
+        keys = items[0].keys()
+        return {key: torch.cat([item[key] for item in items], dim=0) for key in keys}
+
+    @staticmethod
+    def _move_features(
+        features: dict[str, torch.Tensor],
+        *,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> dict[str, torch.Tensor]:
+        return {key: value.to(device=device, dtype=dtype) for key, value in features.items()}
+
+    def _compute_features(
         self,
         waveform: torch.Tensor,
         vad_history: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
-        """从多通道音频中提取帧对齐特征."""
         stft_complex = self.stft(waveform)
         logmel_ref, logmel_rms = build_logmel_like_features(
             stft_complex,
@@ -235,8 +267,6 @@ class UCAFeatureFrontend(nn.Module):
         if not self.use_srp:
             srp_map = torch.zeros_like(srp_map)
 
-        # 所有分支离开 frontend 前都被对齐到同一个历史长度.
-        # 下游模块不需要再各自处理时间维裁剪/补齐.
         logmel_ref = fit_time_dim(logmel_ref, self.spec.target_frames)
         logmel_rms = fit_time_dim(logmel_rms, self.spec.target_frames)
         ipd_feat = fit_time_dim(ipd_feat, self.spec.target_frames)
@@ -255,7 +285,6 @@ class UCAFeatureFrontend(nn.Module):
             raise ValueError("Expected vad_history shape [batch, frames] or [batch, frames, 1].")
         if vad_history.shape[1] != self.spec.target_frames:
             vad_history = fit_time_dim(vad_history.unsqueeze(1), self.spec.target_frames).squeeze(1)
-
         return {
             "logmel_ref": logmel_ref,
             "logmel_rms": logmel_rms,
@@ -263,3 +292,68 @@ class UCAFeatureFrontend(nn.Module):
             "srp_map": srp_map,
             "vad_ratio": vad_history,
         }
+
+    def _load_cached_features(self, path: Path) -> dict[str, torch.Tensor]:
+        payload = torch.load(path, map_location="cpu", weights_only=False)
+        if not isinstance(payload, dict):
+            raise TypeError("Cached feature payload must be a dictionary.")
+        features: dict[str, torch.Tensor] = {}
+        for key, value in payload.items():
+            if not isinstance(value, torch.Tensor):
+                raise TypeError("Cached feature payload values must be tensors.")
+            features[key] = value
+        return features
+
+    def _save_cached_features(self, path: Path, features: dict[str, torch.Tensor]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = path.with_suffix(f".{hashlib.sha1(str(path).encode('utf-8')).hexdigest()}.tmp")
+        try:
+            torch.save({key: value.detach().cpu() for key, value in features.items()}, tmp_path)
+            tmp_path.replace(path)
+        finally:
+            if tmp_path.exists():
+                tmp_path.unlink()
+
+    def forward(
+        self,
+        waveform: torch.Tensor,
+        vad_history: torch.Tensor | None = None,
+        sample_id: str | Sequence[str] | None = None,
+    ) -> dict[str, torch.Tensor]:
+        """Extract aligned frontend features, optionally through a disk cache."""
+        normalized_sample_ids = self._normalize_sample_ids(sample_id, waveform.shape[0])
+        if self.feature_cache_dir is None or normalized_sample_ids is None:
+            return self._compute_features(waveform, vad_history=vad_history)
+
+        features_by_index: dict[int, dict[str, torch.Tensor]] = {}
+        missing_indices: list[int] = []
+        for index, item_id in enumerate(normalized_sample_ids):
+            cache_path = self._cache_path(item_id)
+            if cache_path is not None and cache_path.exists():
+                features_by_index[index] = self._move_features(
+                    self._load_cached_features(cache_path),
+                    device=waveform.device,
+                    dtype=waveform.dtype,
+                )
+            else:
+                missing_indices.append(index)
+
+        if missing_indices:
+            missing_waveform = waveform[missing_indices]
+            missing_vad = vad_history[missing_indices] if vad_history is not None else None
+            missing_features = self._compute_features(missing_waveform, vad_history=missing_vad)
+            for offset, batch_index in enumerate(missing_indices):
+                item_features = {
+                    key: value[offset : offset + 1] for key, value in missing_features.items()
+                }
+                features_by_index[batch_index] = item_features
+                cache_path = self._cache_path(normalized_sample_ids[batch_index])
+                if cache_path is not None:
+                    self._save_cached_features(cache_path, item_features)
+
+        ordered_features = [features_by_index[index] for index in range(waveform.shape[0])]
+        return self._move_features(
+            self._merge_feature_chunks(ordered_features),
+            device=waveform.device,
+            dtype=waveform.dtype,
+        )

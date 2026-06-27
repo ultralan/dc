@@ -62,6 +62,7 @@ class UCA8TrackTrendNet(nn.Module):
         use_ipd: bool = True,
         use_srp: bool = True,
         use_vad: bool = True,
+        feature_cache_dir: str | None = None,
     ) -> None:
         """初始化完整模型结构.
 
@@ -90,9 +91,13 @@ class UCA8TrackTrendNet(nn.Module):
             use_ipd=use_ipd,
             use_srp=use_srp,
             use_vad=use_vad,
+            feature_cache_dir=feature_cache_dir,
         )
         self.spec_encoder = SpectrogramEncoder(out_dim=spec_hidden_dim)
-        self.ipd_encoder = IPDEncoder(in_channels=24, out_dim=spatial_hidden_dim)
+        # IPD 通道数 = 2 (cos/sin) × 麦克风对数, 从前端已推断的 mic_pairs 动态推导,
+        # 兼容 ring2 (8麦纯圆阵, 12对→24通道) 与 ring1+中心 (9麦, 20对→40通道).
+        ipd_in_channels = 2 * len(self.frontend.mic_pairs)
+        self.ipd_encoder = IPDEncoder(in_channels=ipd_in_channels, out_dim=spatial_hidden_dim)
         self.srp_encoder = SRPEncoder(out_dim=spatial_hidden_dim, azimuth_bins=heatmap_bins)
         fused_dim = spec_hidden_dim + spatial_hidden_dim + spatial_hidden_dim + 1
         self.fuse = nn.Sequential(
@@ -134,6 +139,7 @@ class UCA8TrackTrendNet(nn.Module):
         self,
         waveform: torch.Tensor,
         vad_history: torch.Tensor | None = None,
+        sample_id: str | list[str] | tuple[str, ...] | None = None,
     ) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
         """把历史波形编码成帧级时序隐藏状态.
 
@@ -146,7 +152,7 @@ class UCA8TrackTrendNet(nn.Module):
             ``(features, hidden)``. 其中 ``hidden`` 形状为
             ``[batch, history_frames, model_dim]``.
         """
-        features = self.frontend(waveform, vad_history=vad_history)
+        features = self.frontend(waveform, vad_history=vad_history, sample_id=sample_id)
 
         # 三类信息分开编码:
         # - logmel: 单通道/多通道能量谱, 偏内容和能量分布;
@@ -166,13 +172,14 @@ class UCA8TrackTrendNet(nn.Module):
         self,
         waveform: torch.Tensor,
         vad_history: torch.Tensor | None = None,
+        sample_id: str | list[str] | tuple[str, ...] | None = None,
     ) -> dict[str, torch.Tensor]:
         """执行完整前向传播并返回所有监督头.
 
         RealMAN 定位对比当前主要使用 ``heatmap_logits``.
         slot/future 输出保留给跟踪和扩展任务, 不影响 heatmap 定位路径.
         """
-        features, hidden = self.encode(waveform, vad_history=vad_history)
+        features, hidden = self.encode(waveform, vad_history=vad_history, sample_id=sample_id)
         current = hidden[:, -1]
 
         # slot_context 同时服务当前槽位预测和未来 rollout, 让未来预测知道当前有哪些声源槽位.
