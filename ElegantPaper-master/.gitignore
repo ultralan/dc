@@ -13,7 +13,7 @@
 .*.lb
 .DS_Store
 clean.bat
-elegant*-cn.pdf
+
 elegant*-en.pdf
 *.dates
 
