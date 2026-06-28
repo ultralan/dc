@@ -1,4 +1,4 @@
-This is XeTeX, Version 3.141592653-2.6-0.999995 (MiKTeX 24.1) (preloaded format=xelatex 2025.2.24)  27 JUN 2026 11:09
+This is XeTeX, Version 3.141592653-2.6-0.999995 (MiKTeX 24.1) (preloaded format=xelatex 2025.2.24)  27 JUN 2026 15:48
 entering extended mode
  restricted \write18 enabled.
  %&-line parsing enabled.
@@ -674,7 +674,7 @@ Overfull \hbox (4.60066pt too wide) in paragraph at lines 57--73
 [1
 
 ]
-Overfull \hbox (14.5011pt too wide) in paragraph at lines 90--95
+Overfull \hbox (14.5011pt too wide) in paragraph at lines 91--96
 []\TU/SimSun(0)/m/n/10.95 针 对 上 述 不 足\TU/lmr/m/n/10.95 , \TU/SimSun(0)/m/n/10.9
 5 深 度 学 习 方 法 近 年 来 被 广 泛 引 入 声 源 定 位 领 域\TU/lmr/m/n/10.95 , \TU/SimSun(0)/m/n/
 10.95 并 在 声 事 件 定 位 与 检 测 \TU/lmr/m/n/10.95 (Sound
@@ -683,7 +683,7 @@ Overfull \hbox (14.5011pt too wide) in paragraph at lines 90--95
 LaTeX Font Info:    Font shape `TU/SimSun(0)/m/sl' in size <10.95> not availabl
 e
 (Font)              Font shape `TU/SimSun(0)/m/it' tried instead on input line 
-116.
+117.
 [2] [3]
 File: figures/array_geometry.pdf Graphic file (type pdf)
 <use figures/array_geometry.pdf>
@@ -699,7 +699,7 @@ LaTeX Warning: `h' float specifier changed to `ht'.
 LaTeX Warning: `h' float specifier changed to `ht'.
 
 [7] [8]
-Overfull \hbox (26.64536pt too wide) in paragraph at lines 397--407
+Overfull \hbox (26.64536pt too wide) in paragraph at lines 398--408
  [][] 
  []
 
@@ -716,7 +716,7 @@ File: figures/future_pred_vs_true.pdf Graphic file (type pdf)
 LaTeX Warning: `h' float specifier changed to `ht'.
 
 [10] [11]
-Overfull \hbox (12.90479pt too wide) in paragraph at lines 536--542
+Overfull \hbox (12.90479pt too wide) in paragraph at lines 537--543
 []\TU/SimSun(0)/m/n/10.95 尽 管 如 此\TU/lmr/m/n/10.95 , \TU/SimSun(0)/m/n/10.95 本 
 文 仍 存 在 若 干 局 限。|  首 先\TU/lmr/m/n/10.95 , \TU/SimSun(0)/m/n/10.95 当 前 帧 \TU/lmr
 /m/n/10.95 MAE ($\OT1/cmr/m/n/10.95 8\OML/cmm/m/it/10.95 :\OT1/cmr/m/n/10.95 06
@@ -725,7 +725,7 @@ SimSun(0)/m/n/10.95 官 方 \TU/lmr/m/n/10.95 CRNN/IPDnet
  []
 
 
-Overfull \hbox (27.00388pt too wide) in paragraph at lines 545--552
+Overfull \hbox (27.00388pt too wide) in paragraph at lines 546--553
 []\TU/SimSun(0)/m/n/10.95 本 文 针 对 \TU/lmr/m/n/10.95 9 \TU/SimSun(0)/m/n/10.95 通
  道 圆 阵 \TU/lmr/m/n/10.95 (\TU/SimSun(0)/m/n/10.95 圆 周 \TU/lmr/m/n/10.95 8 \TU/S
 imSun(0)/m/n/10.95 麦 加 中 心 麦\TU/lmr/m/n/10.95 ) \TU/SimSun(0)/m/n/10.95 语 音 场 景
